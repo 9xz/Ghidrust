@@ -3,7 +3,7 @@ name = "ghidrust-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Ghidrust Grok Build agent bridge (ACP sidecar + tool_bridge + audit + install)"
+description = "Ghidrust Grok Build glue (install, MCP/skill wiring, program facts, audit)"
 
 [lib]
 path = "src/lib.rs"
