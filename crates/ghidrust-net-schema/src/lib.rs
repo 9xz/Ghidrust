@@ -153,6 +153,9 @@ pub struct Alert {
     pub sid: u32,
     pub msg: String,
     pub severity: u8,
+    /// Suricata action that fired (`alert` / `pass` / `drop`). Recorded, not silently ignored.
+    #[serde(default = "default_alert_action")]
+    pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow_key: Option<FlowKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +165,10 @@ pub struct Alert {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ioc: Option<String>,
+}
+
+fn default_alert_action() -> String {
+    "alert".into()
 }
 
 /// Closed-loop dig job.

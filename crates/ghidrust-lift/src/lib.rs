@@ -729,6 +729,29 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                 PcodeOp::new(OpCode::Pop, Some(rbp), vec![]).with_note("leave"),
             ];
         }
+        "pause" => {
+            return vec![PcodeOp::new(OpCode::Nop, None, vec![]).with_note("pause")];
+        }
+        "clc" | "stc" | "cld" | "std" | "cmc" => {
+            return vec![PcodeOp::new(OpCode::Nop, None, vec![]).with_note(mnem)];
+        }
+        "xchg" => {
+            if parts.len() >= 2 {
+                if let (Some((a, asz)), Some((b, bsz))) = (parse_reg(&parts[0]), parse_reg(&parts[1]))
+                {
+                    let sz = asz.min(bsz);
+                    let va = a.as_varnode(sz);
+                    let vb = b.as_varnode(sz);
+                    let tmp = ctx.take_unique(sz);
+                    return vec![
+                        PcodeOp::new(OpCode::Copy, Some(tmp.clone()), vec![va.clone()]),
+                        PcodeOp::new(OpCode::Copy, Some(va), vec![vb.clone()]),
+                        PcodeOp::new(OpCode::Copy, Some(vb), vec![tmp])
+                            .with_note(format!("xchg {}", insn.operands)),
+                    ];
+                }
+            }
+        }
         "push" => {
             if let Some(first) = parts.first() {
                 if let Some((reg, size)) = parse_reg(first) {
@@ -1077,22 +1100,6 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             };
             if let Some(ops) = lift_shift(ctx, opcode, parts[0], parts[1], mnem, &insn.operands) {
                 return ops;
-            }
-        }
-        "xchg" if parts.len() == 2 => {
-            // xchg a, b  →  tmp = a; a = b; b = tmp.
-            if let (Some((a, asz)), Some((b, bsz))) = (parse_reg(parts[0]), parse_reg(parts[1])) {
-                let sz = asz.min(bsz);
-                let a_vn = a.as_varnode(sz);
-                let b_vn = b.as_varnode(sz);
-                let tmp = ctx.take_unique(sz);
-                return vec![
-                    PcodeOp::new(OpCode::Copy, Some(tmp.clone()), vec![a_vn.clone()])
-                        .with_note("xchg tmp"),
-                    PcodeOp::new(OpCode::Copy, Some(a_vn), vec![b_vn.clone()])
-                        .with_note(format!("xchg {}", insn.operands)),
-                    PcodeOp::new(OpCode::Copy, Some(b_vn), vec![tmp]).with_note("xchg tmp"),
-                ];
             }
         }
         "call" => {
@@ -1788,6 +1795,50 @@ mod tests {
         // Condition emit + CBranch, then Pop.
         assert!(seq.ops.iter().any(|o| o.opcode == OpCode::CBranch));
         assert_eq!(seq.ops.last().unwrap().opcode, OpCode::Pop);
+    }
+
+    #[test]
+    fn common_x86_mnemonics_lift_or_are_explicitly_remaining() {
+        use ghidrust_decode::Instruction;
+        let cases: &[(&str, &str)] = &[
+            ("nop", ""),
+            ("pause", ""),
+            ("push", "rax"),
+            ("pop", "rax"),
+            ("ret", ""),
+            ("leave", ""),
+            ("mov", "rax, rbx"),
+            ("lea", "rax, [rbx]"),
+            ("add", "rax, rbx"),
+            ("sub", "rax, rbx"),
+            ("xor", "rax, rax"),
+            ("and", "rax, rbx"),
+            ("or", "rax, rbx"),
+            ("cmp", "rax, rbx"),
+            ("test", "rax, rax"),
+            ("xchg", "rax, rbx"),
+            ("bswap", "eax"),
+            ("int3", ""),
+            ("hlt", ""),
+            ("syscall", ""),
+            ("cpuid", ""),
+            ("clc", ""),
+            ("call", "rax"),
+            ("jmp", "rax"),
+        ];
+        let mut remaining = Vec::new();
+        for (m, opsnd) in cases {
+            let insn = Instruction::with_text(0x1000, vec![0x90], *m, *opsnd, 1);
+            let ops = lift_instruction(&insn);
+            if ops.iter().all(|o| o.opcode == OpCode::Unimplemented) {
+                remaining.push(*m);
+            }
+        }
+        const STILL_UNIMPLEMENTED: &[&str] = &[];
+        assert_eq!(
+            remaining, STILL_UNIMPLEMENTED,
+            "common mnemonic still Unimplemented: {remaining:?}"
+        );
     }
 
     #[test]

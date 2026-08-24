@@ -19,7 +19,9 @@ use ghidrust_net_correlate::{
 };
 use ghidrust_net_detect::{detect_capture_file, inline_block_allowed, last_alerts, load_rules};
 use ghidrust_net_parse::extract_pivots;
-use ghidrust_net_rules::{load_rule_pack, CompiledRuleset, Rule};
+use ghidrust_net_rules::{
+    install_et_open, load_active_ruleset, load_rule_pack, CompiledRuleset, InstallOpts, Rule,
+};
 use ghidrust_net_schema::{
     Alert, AttributedFlow, CaptureSessionInfo, ClosedLoopConfig, Confidence, ConnectionView,
     DigJob, DigPlan, DigResult, NetHint, NetworkInfo, Owner, PivotFields,
@@ -45,6 +47,8 @@ pub fn network_info() -> NetworkInfo {
             "alerts".into(),
             "rules".into(),
             "pivots".into(),
+            "et-open".into(),
+            "ids".into(),
         ],
         native: true,
         capture: true,
@@ -771,6 +775,41 @@ impl NetworkState {
         }
     }
 
+    /// Same install function as `ghidrust net rules update et-open --from-archive`.
+    pub fn install_et_open_from_archive(&mut self, archive: &Path) -> Result<ghidrust_net_rules::InstallReport, String> {
+        let dest = ghidrust_net_rules::user_rules_root();
+        let rep = install_et_open(InstallOpts {
+            from_archive: Some(archive.display().to_string()),
+            dest_root: Some(dest.display().to_string()),
+            et_version: Some("mini".into()),
+            ..Default::default()
+        })?;
+        self.apply_et_report(&rep);
+        Ok(rep)
+    }
+
+    pub fn install_et_open_online(&mut self) -> Result<ghidrust_net_rules::InstallReport, String> {
+        let dest = ghidrust_net_rules::user_rules_root();
+        let rep = install_et_open(InstallOpts {
+            dest_root: Some(dest.display().to_string()),
+            ..Default::default()
+        })?;
+        self.apply_et_report(&rep);
+        Ok(rep)
+    }
+
+    fn apply_et_report(&mut self, rep: &ghidrust_net_rules::InstallReport) {
+        self.rules_path = rep.path.clone();
+        self.rules_warnings = rep.skip_reasons.clone();
+        self.rules_check_ok = Some(rep.ok);
+        self.status = format!(
+            "ET Open {} loaded={} skipped={}",
+            rep.version, rep.loaded, rep.skipped
+        );
+        self.last_error = rep.error.clone();
+        self.ruleset = load_active_ruleset().ok();
+    }
+
     pub fn check_rules(&mut self) {
         self.last_error = None;
         match load_rule_pack(Path::new(&self.rules_path)) {
@@ -795,6 +834,12 @@ impl NetworkState {
         if self.ruleset.is_some() {
             return Ok(());
         }
+        if let Ok(rs) = load_active_ruleset() {
+            self.rules_warnings = rs.warnings.clone();
+            self.rules_check_ok = Some(true);
+            self.ruleset = Some(rs);
+            return Ok(());
+        }
         let rs = load_rules(Path::new(&self.rules_path)).map_err(|e| e.to_string())?;
         self.rules_warnings = rs.warnings.clone();
         self.rules_check_ok = Some(true);
@@ -814,7 +859,8 @@ impl NetworkState {
         self.alerts.clear();
         self.selected_alert = None;
         if let Err(e) = self.begin_network_job("Detect", move || {
-            let rules = load_rules(Path::new(&rules_path)).map_err(|e| e.to_string())?;
+            let rules = load_active_ruleset()
+                .or_else(|_| load_rules(Path::new(&rules_path)).map_err(|e| e.to_string()))?;
             let mut alerts = detect_capture_file(&path, &rules, &[])?;
             alerts.sort_by(|a, b| {
                 b.severity
@@ -1659,9 +1705,26 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 
 fn render_rules(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
     ui.small(
-        RichText::new("GNR pack — Check before Detect. Default: rules/ghidrust-minimal.rules")
+        RichText::new("GNR / ET Open pack — Check before Detect. Default: rules/ghidrust-minimal.rules + active ET pack")
             .color(muted),
     );
+    ui.horizontal(|ui| {
+        if ui
+            .button("Download / update ET Open")
+            .on_hover_text("Fetch Proofpoint ET Open, verify md5, activate for Detect")
+            .clicked()
+        {
+            match state.install_et_open_online() {
+                Ok(rep) => {
+                    state.status = format!(
+                        "ET Open {} loaded={} skipped={}",
+                        rep.version, rep.loaded, rep.skipped
+                    );
+                }
+                Err(e) => state.last_error = Some(e),
+            }
+        }
+    });
     ui.horizontal(|ui| {
         ui.label("path");
         ui.add(
@@ -2014,6 +2077,7 @@ mod tests {
             sid: 1,
             msg: "prior".into(),
             severity: 1,
+            action: "alert".into(),
             flow_key: None,
             owner: None,
             timestamp_ms: 0,
@@ -2042,6 +2106,7 @@ mod tests {
             sid: 9,
             msg: "keep?".into(),
             severity: 3,
+            action: "alert".into(),
             flow_key: None,
             owner: None,
             timestamp_ms: 0,
@@ -2319,6 +2384,7 @@ mod tests {
             sid: 1,
             msg: "t".into(),
             severity: 2,
+            action: "alert".into(),
             flow_key: None,
             owner: Some(Owner {
                 pid: 1,
@@ -2347,6 +2413,7 @@ mod tests {
             sid: 1,
             msg: "t".into(),
             severity: 1,
+            action: "alert".into(),
             flow_key: None,
             owner: None,
             timestamp_ms: 0,
@@ -2426,6 +2493,47 @@ mod tests {
     }
 
     #[test]
+    fn download_et_open_button_is_wired_to_install() {
+        let src = include_str!("network.rs");
+        assert!(src.contains("Download / update ET Open"));
+        assert!(src.contains("install_et_open_online"));
+        assert!(src.contains("install_et_open_from_archive"));
+        let dir = std::env::temp_dir().join(format!(
+            "gui-et-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(dir.join("src"));
+        std::fs::write(dir.join("src").join("LICENSE"), b"test\n").unwrap();
+        std::fs::write(
+            dir.join("src").join("et.rules"),
+            b"alert tcp any any -> any any (msg:\"c\"; content:\"EVILCMD\"; sid:2000001;)\n",
+        )
+        .unwrap();
+        let bytes = ghidrust_net_rules::tar_gz_dir(&dir.join("src")).unwrap();
+        let arch = dir.join("mini.tar.gz");
+        std::fs::write(&arch, &bytes).unwrap();
+        let dest = dir.join("rules-root");
+        std::env::set_var("GHIDRUST_RULES_DIR", dest.display().to_string());
+        let mut st = NetworkState::default();
+        let rep = st.install_et_open_from_archive(&arch).expect("install");
+        assert!(rep.ok, "{:?}", rep.error);
+        assert!(
+            rep.loaded >= 1,
+            "loaded={} skipped={} reasons={:?}",
+            rep.loaded,
+            rep.skipped,
+            rep.skip_reasons
+        );
+        assert!(st.ruleset.as_ref().map(|r| !r.rules.is_empty()).unwrap_or(false));
+        std::env::remove_var("GHIDRUST_RULES_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn refresh_connections_via_worker() {
         let mut st = NetworkState::default();
         st.refresh_connections();
@@ -2497,7 +2605,7 @@ mod tests {
         assert!(info.native);
         assert!(info.capture);
         assert_eq!(info.wave, 5);
-        for need in ["dig", "capture", "detect", "pivots", "connections"] {
+        for need in ["dig", "capture", "detect", "pivots", "connections", "et-open", "ids"] {
             assert!(info.caps.iter().any(|c| c == need), "missing cap {need}");
         }
     }

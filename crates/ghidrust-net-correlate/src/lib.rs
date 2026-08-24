@@ -326,6 +326,7 @@ mod tests {
             sid: 1000001,
             msg: "test".into(),
             severity: 2,
+            action: "alert".into(),
             flow_key: None,
             owner: None,
             timestamp_ms: 0,

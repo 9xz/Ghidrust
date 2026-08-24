@@ -33,7 +33,16 @@ cargo run -p ghidrust-gui --release
 
 Windows: `.\target\release\ghidrust.exe` / `.\target\release\ghidrust-gui.exe`. Friction surfaces (`inventory`, `tree`, `artifact`, `process`, `rtti --filter`) match MCP tool names in `tool_defs()` — see [`SKILL.md`](SKILL.md).
 
-Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from`; `>= 5` for decode tools; **`>= 6`** for crypto recover/bake; **`>= 7`** for live process debug; **`>= 8`** for Ghidnet (`net_*`, `server_info.network`; see [ghidnet.md](ghidnet.md)). Restart MCP after rebuild if those tools are missing.
+Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from`; `>= 5` for decode tools; **`>= 6`** for crypto recover/bake; **`>= 7`** for live process debug; **`>= 8`** for Ghidnet (`net_*`, `net_rules_update`, `server_info.network`; see [ghidnet.md](ghidnet.md)). Restart MCP after rebuild if those tools are missing.
+
+Ghidnet / ET Open smoke (IDS alerts, not kernel IPS):
+
+```bash
+./target/release/ghidrust net help
+./target/release/ghidrust net rules update et-open --from-archive fixtures/et-open-mini.tar.gz --et-version mini --json
+./target/release/ghidrust net rules list --json
+./target/release/ghidrust net detect --payload-file fixtures/et-http-gate.bin --json
+```
 
 Smoke crypto surfaces:
 

@@ -3,13 +3,15 @@ name: ghidrust
 description: >
   x86-64 Auto Analysis, projects, CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory,
   GPU analyzer kernels + multipass decompile, crypt-constants / recover-strings / decode bake /
-  crypto-capabilities, Ghidnet native network dig/connections/capture/detect/pivots/rules.
+  crypto-capabilities, Ghidnet native network dig/connections/capture/detect/pivots/rules,
+  ET Open, IDS/IPS-class alerts.
   Exhaustive feature catalog with when-to-use guidance.
   Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, decode-support, decode-query,
   MCP ghidrust, strings/functions, crypt-constants, recover-strings, decode bake, decode magic,
   crypto-capabilities, GPU decompile, IL2CPP, global-metadata, unity-inventory, GameAssembly,
   analyzer-bench, rtti-gpu-bench, bulk-bench, Ghidnet, net dig, phone home, network pivot, IOC dig,
-  net_connections, net_detect, net_capture, net_rules_check, GNR, ghidrust-netcap.
+  net_connections, net_detect, net_capture, net_rules_check, net_rules_update, ET Open, emerging
+  threats, IDS, IPS, GNR, ghidrust-netcap.
 metadata:
   short-description: "Ghidrust RE — decode, crypto, Ghidnet, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
 ---
@@ -26,8 +28,9 @@ metadata:
 | CLI | `cargo run -p ghidrust-cli --release -- <cmd>` or `target/release/ghidrust.exe` |
 | GUI | `cargo run -p ghidrust-gui --release` |
 | Ghidnet helper | `target/release/ghidrust-netcap` |
-| GNR rules | `rules/ghidrust-minimal.rules` |
-| Ghidnet SOP | [ghidnet.md](ghidnet.md) (`tool_surface >= 8`) |
+| GNR rules | `rules/ghidrust-minimal.rules` (merged into the active ET pack) |
+| ET Open pack | `GHIDRUST_RULES_DIR` or `%APPDATA%/ghidrust/rules/et-open/<version>/` (`net rules update et-open`) |
+| Ghidnet SOP | [ghidnet.md](ghidnet.md) (`tool_surface >= 8`; ET Open + IDS) |
 | Fixtures | `fixtures/tiny_x64.pe`, `fixtures/analysis_lab.pe`, `fixtures/tiny_x64.elf`, `fixtures/il2cpp/*` |
 | Docs | `README.md`, `docs/IL2CPP.md`, `docs/GPU_ANALYZER_MATRIX.md`, `docs/PARALLEL_RE_RESEARCH.md` |
 | Decode API | `ghidrust-decode::Engine` — `open`, `disasm`, `disasm_one`, `option`, `insn_name`, `reg_name`, `group_name`, `regs_access`; re-exported from `ghidrust-core` |
@@ -280,7 +283,7 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
 - **Live process (Windows, `tool_surface >= 7`)**: Multi-step live work **must** use MCP (or one long-lived process). Default attach is **observe** (read-only). Pass `mode: "debug"` for break/step/registers/stack. Loop: `process_list` → `process_attach|process_launch` → `process_modules` → `process_resolve` → optional `process_break_set` / `process_scan` / `process_watch_expr` → `process_continue`/`process_wait` → regs/stack/`process_read` → `process_export_snapshot` → `process_detach`. Observe launch still uses CREATE_SUSPENDED + `process_resume`. Debug launch uses Windows debug APIs (initial break). Never chain separate CLI `ghidrust process` spawns expecting the same `session_id`. Bytes ≠ types. Hardware BP / instrument mode not enabled.
-- **Ghidnet (native, `tool_surface >= 8`)**: Prefer `net_dig` / `net_playbook` over hand-chained load/analyze for phone-home / IOC digs. Check `server_info.network`. Default pack: `rules/ghidrust-minimal.rules`. Multi-step capture/detect **must** use MCP or GUI Network host (`session_id` process-local). GUI: **Network** / **Window → Network** (Connections\|Capture\|Alerts\|Rules\|Dig); Dig → **Open in Listing**; Capture **Export path**; inline block only if `GHIDRUST_NET_INLINE=1`. Airgap: path-only dig; refuse live observe/capture/detect. Never invent hosts; `pid_confidence=unknown` ≠ ground truth; no foreign IDS. Full matrix/workflows: [ghidnet.md](ghidnet.md).
+- **Ghidnet (native, `tool_surface >= 8`)**: Prefer `net_dig` / `net_playbook` over hand-chained load/analyze for phone-home / IOC digs. Check `server_info.network` (`caps` include `et-open` / `ids`). **ET Open:** `net_rules_update` / CLI `net rules update et-open` / GUI **Download / update ET Open** (same `install_et_open`). Detect without `rules` uses the active pack + `rules/ghidrust-minimal.rules`. IDS: `alert`/`pass`/`drop` recorded — **not** kernel IPS. Unimplemented ET keywords skip that SID (`net_rules_list` `skipped`). Live capture is ghidnetcap (fail-closed `privilege_required`). Multi-step capture/detect **must** use MCP or GUI (`session_id` process-local). Airgap: path-only dig; ET via `from_archive`. Never invent hosts; `pid_confidence=unknown` ≠ ground truth; do not install Suricata. Full matrix: [ghidnet.md](ghidnet.md).
 - **IL2CPP offline → live**: (1) `il2cpp_touch_map` / `il2cpp_meta` / `il2cpp_map` for names + method RVAs (null = unknown offline; encrypted → `next_steps` with meta-sections/touch-map). (2) Require `body_class` not `shared_stub` / `semantics_mismatch` before treating a name as a hook target. (3) `decompile` + `follow_stub` for resolve stubs with mapped slots. (4) On `runtime_unresolved` / `trampoline_or_invoker` → live attach → `process_resolve(module, rva)` → `process_read`. (5) Multi-build work: `il2cpp map --baseline PREV.json` → inspect `build_skew` (stale **map catalog**, not only stale MCP binary).
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
 - **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only); hook shared stubs as unique gameplay methods.
@@ -327,11 +330,13 @@ Need crypto constants / obfuscated strings / peel a blob?
 
 Need network dig / phone-home / IOC → binary (Ghidnet, tool_surface >= 8)?
   → server_info.network first; full matrix: skill/ghidnet.md
+  → ET Open: net_rules_update (or CLI net rules update et-open / GUI Download)
   → MCP: net_connections → net_dig (execute)  OR  net_capture_* → net_flows → dig
-  → Detect: net_rules_check → net_detect → net_dig (alert_id)
+  → Detect: net_rules_list → net_detect (omit rules = active pack) → net_dig (alert_id)
   → Pivots: net_pivots → net_dig host/ioc
-  → CLI: ghidrust net … ; GUI: Network host tabs
-  → Airgap: path-only net_dig; no foreign IDS
+  → CLI: ghidrust net help ; GUI: Network host tabs
+  → IDS not kernel IPS; skipped SIDs are honest; live NIC may return privilege_required
+  → Airgap: path-only net_dig; ET from_archive; no Suricata/Npcap crates
 
 Need GPU decompile at a VA?
   → gpu-decompile <path> --addr HEX   (metrics JSON; .gdecomp opaque)
@@ -485,9 +490,9 @@ Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_ca
 | `process_scan` / `process_watch_expr` / `process_vtable_probe` / `process_export_snapshot` | session / aob / expr / addr | Live data discovery (`tool_surface >= 7`) |
 | `net_dig` / `net_playbook` | path / pid / host / ioc / alert_id / execute / live | Dig playbooks + closed-loop (`tool_surface >= 8`; see [ghidnet.md](ghidnet.md)) |
 | `net_connections` / `net_owners` | pid / path / proto / max | Host socket → owner (airgap refuses) |
-| `net_ifaces` / `net_capture_start` / `_stop` / `_status` / `net_flows` | iface / filter / session_id / replay_path | Capture sessions (airgap refuses) |
-| `net_detect` / `net_alerts` | pcap / rules / max | GNR detect + alert queue |
-| `net_rules_list` / `net_rules_load` / `net_rules_check` | path | GNR pack list/load/check (`rules/ghidrust-minimal.rules`) |
+| `net_ifaces` / `net_capture_start` / `_stop` / `_status` / `net_flows` | iface / filter / session_id / replay_path | ghidnetcap live or replay (airgap refuses; live `privilege_required`) |
+| `net_detect` / `net_alerts` | pcap / optional `rules` / max | GNR/ET detect; omit `rules` → active pack + minimal; IDS records only |
+| `net_rules_list` / `net_rules_load` / `net_rules_check` / `net_rules_update` | path / `from_archive` / `url` / `et_version` / `dest` | List/check packs; one-click ET Open install (same as CLI/GUI) |
 | `net_pivots` | pcap | DNS / TLS SNI / HTTP / SMB pivots |
 | `net_job_get` | job_id | **Stub** — do not rely on async dig jobs yet |
 
@@ -672,6 +677,7 @@ Add `--json` for structured stdout.
 | Tree | `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB]` |
 | Artifact | `ghidrust artifact get\|query\|list …` |
 | Process (Windows) | `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions\|break\|continue\|wait\|step\|threads\|regs\|stack\|scan\|watch\|vtable\|snapshot …` |
+| **Ghidnet** | `ghidrust net help` — `dig\|playbook\|connections\|owners\|ifaces\|capture\|flows\|detect\|alerts\|rules\|pivots` (ET Open: `net rules update et-open`; detect default = active pack; see [ghidnet.md](ghidnet.md)) |
 | IL2CPP | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls …` (`--baseline` / `--meta-sections`; see `docs/IL2CPP.md`) |
 | Unity inventory | `ghidrust unity-inventory <game-dir>` |
 | RTTI catalog | `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE]` |
@@ -741,6 +747,15 @@ ghidrust process scan SESSION -aob "48 8b ?? 90"
 ghidrust process watch SESSION "module.exe+0x1234->*+0x10"
 ghidrust process read SESSION --addr LIVE_VA --size 64 --json
 ghidrust process detach SESSION
+
+# Ghidnet / ET Open / IDS (tool_surface >= 8; see skill/ghidnet.md)
+ghidrust net help
+ghidrust net rules update et-open --json
+ghidrust net rules list --json
+ghidrust net detect --payload-file fixtures/et-http-gate.bin --json
+ghidrust net connections --json
+ghidrust net ifaces --json
+ghidrust net dig --path PATH --execute --json
 
 # Unity / IL2CPP
 ghidrust unity-inventory GAME_DIR --json
@@ -883,6 +898,7 @@ Guardrails to respect:
 | Progress | One analyzer per frame |
 | Project tree | Open / Analyze / Delete |
 | Decompiler pane | Placeholder / GPU dump via CLI preferred |
+| **Network host** | Connections / Capture / Alerts / Rules / Dig. Rules: **Download / update ET Open**. Detect uses active pack. Live capture: ghidnetcap (`privilege_required` if unprivileged). |
 
 ---
 
@@ -907,4 +923,6 @@ ghidrust il2cpp stubs --binary fixtures/il2cpp/il2cpp_stub_lab.pe --filter Camer
 ghidrust decompile fixtures/il2cpp/il2cpp_stub_lab.pe --addr 0x140001000 --follow-stub --json
 ghidrust bytes fixtures/il2cpp/il2cpp_stub_lab.pe --addr 0x140001000 --count 32 --json
 ghidrust strings fixtures/il2cpp/meta_v31.dat --raw --filter Camera --match token --limit 5 --json
+ghidrust net help
+ghidrust net rules list --json
 ```

@@ -11,7 +11,10 @@ use ghidrust_net_correlate::{
 use ghidrust_net_detect::{compile_rules_text, detect_capture_file, detect_frames, last_alerts, load_rules};
 use ghidrust_net_flow::Frame;
 use ghidrust_net_parse::extract_pivots;
-use ghidrust_net_rules::compile_rules;
+use ghidrust_net_rules::{
+    compile_rules, install_et_open, list_rules_json, load_active_ruleset, CompiledRuleset,
+    InstallOpts,
+};
 use ghidrust_net_schema::{
     Alert, ClosedLoopConfig, Confidence, FlowKey, NetHint, NetworkInfo, Owner,
 };
@@ -36,6 +39,8 @@ pub fn network_info_json() -> Value {
             "alerts".into(),
             "rules".into(),
             "pivots".into(),
+            "et-open".into(),
+            "ids".into(),
         ],
         native: true,
         capture: true,
@@ -59,14 +64,44 @@ fn opt(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+fn print_net_help() {
+    eprintln!(
+        "ghidrust net — Ghidnet (tool_surface>=8): attribute → detect → dig\n\
+         \n\
+         Usage:\n\
+           ghidrust net connections [--pid N] [--path SUB] [--proto tcp|udp] [--listening] [--max N] [--json]\n\
+           ghidrust net owners --pid N [--json]\n\
+           ghidrust net ifaces [--json]\n\
+           ghidrust net capture start [--iface NAME] [--replay FILE] [--filter BPF] [--pid N] [--path SUB] [--out DIR] [--json]\n\
+           ghidrust net capture stop|status <session_id> [--json]\n\
+           ghidrust net flows <session_id> [--max N] [--json]\n\
+           ghidrust net rules update et-open [--from-archive FILE] [--url URL] [--et-version V] [--dest DIR] [--json]\n\
+           ghidrust net rules list [--json]\n\
+           ghidrust net rules check|load --path FILE [--json]\n\
+           ghidrust net detect --pcap FILE [--rules PATH] [--json]\n\
+           ghidrust net detect --payload-file FILE [--rules PATH] [--json]\n\
+           ghidrust net alerts [--max N] [--json]\n\
+           ghidrust net pivots --pcap FILE [--json]\n\
+           ghidrust net dig [--path FILE] [--host H] [--ioc S] [--from-alert ID] [--execute] [--live] [--json]\n\
+           ghidrust net playbook [--path FILE] [--host H] [--ioc S] [--json]\n\
+         \n\
+         Detect (no --rules) uses the active ET Open pack + rules/ghidrust-minimal.rules.\n\
+         Pack dir: GHIDRUST_RULES_DIR, else %APPDATA%/ghidrust/rules (Windows) or ~/.ghidrust/rules.\n\
+         Live capture: ghidnetcap (Windows NPF or SIO_RCVALL; Unix packet sockets). Fail-closed: privilege_required.\n\
+         IDS: alert/pass/drop are recorded as alerts; drop is not kernel IPS. See README Ghidnet.\n"
+    );
+}
+
 pub fn cmd_net(args: &[String], json: bool) -> ExitCode {
     if args.is_empty() {
-        eprintln!(
-            "usage: ghidrust net dig|playbook|connections|owners|ifaces|capture|flows|detect|alerts|rules|pivots … [-json]"
-        );
+        print_net_help();
         return ExitCode::from(2);
     }
     match args[0].as_str() {
+        "help" | "-h" | "--help" => {
+            print_net_help();
+            ExitCode::SUCCESS
+        }
         "dig" => cmd_dig(&args[1..], json),
         "playbook" => cmd_playbook(&args[1..], json),
         "connections" => cmd_connections(&args[1..], json),
@@ -251,7 +286,11 @@ fn cmd_owners(args: &[String], json: bool) -> ExitCode {
 
 fn cmd_capture(args: &[String], json: bool) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: ghidrust net capture start|stop|status …");
+        eprintln!(
+            "usage: ghidrust net capture start [--iface NAME] [--replay FILE] [--filter BPF] [--pid N] [--out DIR]\n\
+                    ghidrust net capture stop|status <session_id>\n\
+             Live iface needs elevation (privilege_required). Prefer --replay FILE in CI."
+        );
         return ExitCode::from(2);
     }
     match args[0].as_str() {
@@ -333,15 +372,26 @@ fn cmd_flows(args: &[String], json: bool) -> ExitCode {
     }
 }
 
+/// `--rules PATH` or active ET pack + bundled `ghidrust-minimal.rules`.
+fn resolve_detect_rules(rules_path: Option<&str>) -> Result<(CompiledRuleset, String), String> {
+    if let Some(p) = rules_path {
+        let r = load_rules(std::path::Path::new(p))?;
+        return Ok((r, p.to_string()));
+    }
+    match load_active_ruleset() {
+        Ok(r) => Ok((r, "active-pack".into())),
+        Err(_) => {
+            let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../rules/ghidrust-minimal.rules");
+            let r = load_rules(&fallback)?;
+            Ok((r, fallback.display().to_string()))
+        }
+    }
+}
+
 fn cmd_detect(args: &[String], json: bool) -> ExitCode {
-    let rules_path = opt(args, "rules").unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../rules/ghidrust-minimal.rules")
-            .display()
-            .to_string()
-    });
-    let rules = match load_rules(std::path::Path::new(&rules_path)) {
-        Ok(r) => r,
+    let (rules, rules_path) = match resolve_detect_rules(opt(args, "rules").as_deref()) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
@@ -392,25 +442,55 @@ fn cmd_detect(args: &[String], json: bool) -> ExitCode {
             }
         }
     } else {
-        eprintln!("usage: ghidrust net detect --pcap FILE [--rules PATH] [-json]");
+        eprintln!(
+            "usage: ghidrust net detect --pcap FILE [--rules PATH] [--json]\n\
+                    ghidrust net detect --payload-file FILE [--rules PATH] [--json]\n\
+             Default rules: active ET Open pack + rules/ghidrust-minimal.rules (GHIDRUST_RULES_DIR)."
+        );
         ExitCode::from(2)
     }
 }
 
 fn cmd_rules(args: &[String], json: bool) -> ExitCode {
     if args.is_empty() {
-        eprintln!("usage: ghidrust net rules list|load|check …");
+        eprintln!(
+            "usage: ghidrust net rules list|load|check|update et-open [--from-archive FILE] [--et-version V] [--url URL] [--dest DIR] [--json]"
+        );
         return ExitCode::from(2);
     }
     match args[0].as_str() {
         "list" => {
-            let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../rules/ghidrust-minimal.rules");
-            print_val(
-                &json!({"packs":[default.display().to_string()], "native": true}),
-                json,
-            );
+            print_val(&list_rules_json(), json);
             ExitCode::SUCCESS
+        }
+        "update" => {
+            let rest = &args[1..];
+            let _ = rest.first().map(|s| s.as_str()); // et-open
+            let opts = InstallOpts {
+                from_archive: opt(args, "from-archive"),
+                url: opt(args, "url"),
+                et_version: opt(args, "et-version"),
+                et_code: opt(args, "et-code"),
+                dest_root: opt(args, "dest"),
+            };
+            match install_et_open(opts) {
+                Ok(rep) => {
+                    print_val(&serde_json::to_value(&rep).unwrap(), json);
+                    if json {
+                        ExitCode::SUCCESS
+                    } else {
+                        println!(
+                            "et-open version={} loaded={} skipped={} path={}",
+                            rep.version, rep.loaded, rep.skipped, rep.path
+                        );
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         "load" | "check" => {
             let Some(path) = opt(args, "path").or_else(|| args.get(1).cloned()) else {
@@ -418,24 +498,20 @@ fn cmd_rules(args: &[String], json: bool) -> ExitCode {
                 return ExitCode::from(2);
             };
             match std::fs::read_to_string(&path) {
-                Ok(text) => match compile_rules(&text) {
-                    Ok(set) => {
-                        print_val(
-                            &json!({
-                                "ok": true,
-                                "path": path,
-                                "rule_count": set.rules.len(),
-                                "warnings": set.warnings,
-                            }),
-                            json,
-                        );
-                        ExitCode::SUCCESS
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        ExitCode::FAILURE
-                    }
-                },
+                Ok(text) => {
+                    let set = compile_rules(&text);
+                    print_val(
+                        &json!({
+                            "ok": true,
+                            "path": path,
+                            "rule_count": set.rules.len(),
+                            "skipped": set.skipped.len(),
+                            "warnings": set.warnings,
+                        }),
+                        json,
+                    );
+                    ExitCode::SUCCESS
+                }
                 Err(e) => {
                     eprintln!("error: {e}");
                     ExitCode::FAILURE
@@ -605,17 +681,8 @@ pub fn mcp_net(tool: &str, args: &Value, mode: AgentMode) -> Result<String, Stri
                 .get("pcap")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "pcap required".to_string())?;
-            let rules_path = args
-                .get("rules")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../../rules/ghidrust-minimal.rules")
-                        .display()
-                        .to_string()
-                });
-            let rules = load_rules(std::path::Path::new(&rules_path))?;
+            let (rules, rules_path) =
+                resolve_detect_rules(args.get("rules").and_then(|v| v.as_str()))?;
             let mut attr: Vec<(FlowKey, Owner)> = Vec::new();
             if let Some(ap) = args.get("attr").and_then(|v| v.as_str()) {
                 if let Ok(text) = std::fs::read_to_string(ap) {
@@ -638,7 +705,7 @@ pub fn mcp_net(tool: &str, args: &Value, mode: AgentMode) -> Result<String, Stri
             }
             let alerts = detect_capture_file(std::path::Path::new(pcap), &rules, &attr)?;
             ALERT_INDEX.lock().unwrap().clone_from(&alerts);
-            Ok(serde_json::to_string_pretty(&json!({"alerts": alerts})).unwrap())
+            Ok(serde_json::to_string_pretty(&json!({"alerts": alerts, "rules": rules_path})).unwrap())
         }
         "net_alerts" => {
             let max = args.get("max").and_then(|v| v.as_u64()).map(|u| u as usize);
@@ -648,11 +715,18 @@ pub fn mcp_net(tool: &str, args: &Value, mode: AgentMode) -> Result<String, Stri
             }
             Ok(serde_json::to_string_pretty(&json!({"alerts": alerts})).unwrap())
         }
-        "net_rules_list" => Ok(serde_json::to_string_pretty(&json!({
-            "packs": ["rules/ghidrust-minimal.rules"],
-            "native": true
-        }))
-        .unwrap()),
+        "net_rules_list" => Ok(serde_json::to_string_pretty(&list_rules_json()).unwrap()),
+        "net_rules_update" => {
+            let opts = InstallOpts {
+                from_archive: args.get("from_archive").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                url: args.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                et_version: args.get("et_version").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                et_code: args.get("et_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                dest_root: args.get("dest").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            };
+            let rep = install_et_open(opts)?;
+            Ok(serde_json::to_string_pretty(&rep).unwrap())
+        }
         "net_rules_load" | "net_rules_check" => {
             let path = args
                 .get("path")
@@ -664,6 +738,7 @@ pub fn mcp_net(tool: &str, args: &Value, mode: AgentMode) -> Result<String, Stri
                 "ok": true,
                 "path": path,
                 "rule_count": set.rules.len(),
+                "skipped": set.skipped.len(),
                 "warnings": set.warnings
             }))
             .unwrap())

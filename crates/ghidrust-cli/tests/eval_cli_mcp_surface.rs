@@ -90,6 +90,23 @@ const EXPECTED_MCP_TOOLS: &[&str] = &[
     "function_at",
     "get_function_by_address",
     "function_create",
+    "net_dig",
+    "net_playbook",
+    "net_connections",
+    "net_owners",
+    "net_ifaces",
+    "net_capture_start",
+    "net_capture_stop",
+    "net_capture_status",
+    "net_flows",
+    "net_detect",
+    "net_alerts",
+    "net_rules_list",
+    "net_rules_load",
+    "net_rules_check",
+    "net_rules_update",
+    "net_pivots",
+    "net_job_get",
 ];
 
 const EXPECTED_CLI_COMMANDS: &[&str] = &[
@@ -118,6 +135,7 @@ const EXPECTED_CLI_COMMANDS: &[&str] = &[
     "tree",
     "artifact",
     "process",
+    "net",
     "bulk-bench",
     "decompile",
     "decompile-bench",
@@ -622,6 +640,22 @@ fn eval_cli_mcp_surface_catalog() {
                 truncate(&blob, 400),
             ));
         }
+        if ok && blob.contains("ghidrust net") {
+            rows.push(row_pass(
+                "catalog",
+                "cli_help_lists_net",
+                ms,
+                "help includes ghidrust net",
+            ));
+        } else {
+            rows.push(row_fail(
+                "catalog",
+                "cli_help_lists_net",
+                ms,
+                "help missing net",
+                truncate(&blob, 400),
+            ));
+        }
     }
 
     // --- CLI smoke ---
@@ -809,6 +843,19 @@ fn eval_cli_mcp_surface_catalog() {
         "cli:process_list",
         &["process", "list", "-json"],
         &["["],
+    ));
+    rows.push(expect_cli_json(
+        "cli:net_ifaces",
+        &["net", "ifaces", "-json"],
+    ));
+    rows.push(expect_cli_json(
+        "cli:net_dig",
+        &["net", "dig", "-path", &pe, "-json"],
+    ));
+    rows.push(expect_cli_honest(
+        "cli:net_owners_usage",
+        &["net", "owners"],
+        &["usage", "pid"],
     ));
     for (name, sub) in [
         ("cli:process_attach_usage", "attach"),
@@ -1062,6 +1109,93 @@ fn eval_cli_mcp_surface_catalog() {
             "process_step_out",
             json!({ "session_id": "eval-missing-session" }),
         ),
+        (
+            "process_step_into",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_step_over",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_continue",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_pause",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_wait",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_threads",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_stack",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_break_list",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_break_set",
+            json!({ "session_id": "eval-missing-session", "addr": "0x140001000" }),
+        ),
+        (
+            "process_break_clear",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_thread_context_get",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_thread_context_set",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_scan",
+            json!({ "session_id": "eval-missing-session", "aob": "90" }),
+        ),
+        (
+            "process_watch_expr",
+            json!({ "session_id": "eval-missing-session", "expr": "*+0" }),
+        ),
+        (
+            "process_export_snapshot",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "process_vtable_probe",
+            json!({ "session_id": "eval-missing-session", "addr": "0x140001000" }),
+        ),
+        ("net_ifaces", json!({})),
+        ("net_alerts", json!({})),
+        ("net_rules_list", json!({})),
+        ("net_dig", json!({ "path": pe })),
+        ("net_playbook", json!({ "path": pe })),
+        ("net_connections", json!({})),
+        ("net_owners", json!({})),
+        ("net_capture_start", json!({})),
+        ("net_capture_stop", json!({})),
+        (
+            "net_capture_status",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        (
+            "net_flows",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
+        ("net_detect", json!({ "pcap": "missing.pcap" })),
+        ("net_rules_load", json!({ "path": "missing.rules" })),
+        ("net_rules_check", json!({ "path": "missing.rules" })),
+        ("net_rules_update", json!({})),
+        ("net_pivots", json!({ "pcap": pe })),
+        ("net_job_get", json!({ "job_id": "none" })),
     ];
 
     const CHUNK: usize = 10;

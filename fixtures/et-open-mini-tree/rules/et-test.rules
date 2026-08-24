@@ -1,0 +1,7 @@
+
+alert tcp any any -> any any (msg:"ET TEST content"; content:"EVILCMD"; sid:2000001; rev:1;)
+alert http any any -> any any (msg:"ET TEST uri"; http.uri; content:"/gate.php"; sid:2000002; rev:1;)
+alert tls any any -> any any (msg:"ET TEST sni"; tls.sni; content:"evil.example"; sid:2000003; rev:1;)
+alert dns any any -> any any (msg:"ET TEST dns"; dns.query; content:"c2.example"; sid:2000004; rev:1;)
+alert tcp any any -> any any (msg:"ET TEST pcre"; pcre:"/PAY[0-9]{3}/"; sid:2000005; rev:1;)
+alert tcp any any -> any any (msg:"ET TEST flowbits"; content:"X"; flowbits:set,ET.foo; sid:2000006; rev:1;)

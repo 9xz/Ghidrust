@@ -4,7 +4,7 @@
 
 Ghidrust loads PE/ELF (and raw blobs), produces Capstone-class multi-arch listings (23 ISAs; x86-64 primary analyze/decompile pipeline), runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
 
-**Ghidnet** (native network plane) attributes host sockets and capture flows to processes/images, runs in-tree GNR detection rules, and digs into the offending binary with the same RE stack.
+**Ghidnet** (native network plane) attributes host sockets and capture flows to processes/images, runs in-tree GNR / Proofpoint ET Open detection (IDS-class `alert`/`pass`/`drop` records — not kernel IPS), and digs into the offending binary with the same RE stack.
 
 It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyzers, decompile, Ghidnet) is written in-tree so the core stays small, auditable, and freestanding.
 
@@ -22,7 +22,7 @@ Includes custom GPU kernels to conduct decompiling at lightning speed, this feat
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
 | **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref support, function create / bounded disasm / call graphs, IL2CPP touch-map + body proof, live process bridge (Windows), **Ghidnet** (`net_*`, `tool_surface` ≥ 8), and egui panes for every surface. **2026-07-19:** Windows agent disasm pipeline + bounds honesty (`--brief`/`--pretty`, `bounds_suspect`, `listing_text`) — see [CHANGELOG.md](CHANGELOG.md) |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
-| **Ghidnet (native)** | Process-attributed sockets/flows → GNR alerts → dig into image (`load`/`analyze`/`decompile` / live process). In-tree only — see [Ghidnet](#ghidnet-native-network-plane) |
+| **Ghidnet (native)** | Process-attributed sockets/flows → GNR/ET Open IDS alerts → dig into image (`load`/`analyze`/`decompile` / live process). In-tree only — see [Ghidnet](#ghidnet-native-network-plane) |
 
 ---
 
@@ -204,7 +204,7 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 | `ghidrust tree <path>` | Bounded file tree index (existence/size; no unpack) | `--max-depth`, `--ext`, `--name`, `--json` |
 | `ghidrust artifact get\|query\|list` | Drain spilled analysis artifacts (`next_offset`) | `--offset`, `--limit`, `--json` |
 | `ghidrust process list\|attach\|launch\|…\|break\|wait\|scan\|watch` | Live Process Bridge (Windows; observe default, `mode=debug` for BP/step; `tool_surface` ≥ 7) | session_id / `-mode` / `--args` / `--cwd` / `--addr` / `--module` / `--rva` |
-| `ghidrust net dig\|playbook\|connections\|owners\|ifaces\|capture\|flows\|detect\|alerts\|rules\|pivots` | **Ghidnet** — attribute sockets/flows, GNR detect, dig into image (`tool_surface` ≥ 8) | See [Ghidnet](#ghidnet-native-network-plane) |
+| `ghidrust net dig\|playbook\|connections\|owners\|ifaces\|capture\|flows\|detect\|alerts\|rules\|pivots` | **Ghidnet** — attribute sockets/flows, ET Open / GNR detect, dig into image (`tool_surface` ≥ 8) | See [Ghidnet](#ghidnet-native-network-plane); `ghidrust net help` |
 | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls` | IL2CPP metadata + touch-map + method map (body proof / baseline) + stubs + icalls | See [docs/IL2CPP.md](docs/IL2CPP.md) |
 | `ghidrust unity-inventory <dir>` | Unity player layout (reuses PE VERSIONINFO helpers) | `--json`, `--out FILE` |
 | `ghidrust disasm <path>` | Capstone-class listing; bounded by function end by default; `decode_gaps` when `--skip-bad`; JSON `stop_reason` | `--addr HEX`, `--count N` (default 16), `--skip-bad`, `--linear`/`--flow`, `--arch`, `--mode`, `--syntax`, `--detail`/`--no-detail`, `--detail-real`, `--skipdata`, `--skipdata-mnemonic`, `--skipdata-size`, `--unsigned-imm`, `--only-offset-branch`, `--litbase`, `--mnem-override ID:MNEMONIC`, `--out`, `--json` |
@@ -558,7 +558,8 @@ On Linux/macOS:
 | `net_dig` / `net_playbook` | hint fields (`path`/`pid`/`host`/`ioc`) or alert/flow refs | Compile or execute dig playbook; closed-loop from alert (`tool_surface` ≥ 8) |
 | `net_connections` / `net_owners` / `net_ifaces` | optional pid / filter | Host sockets → owning image; interface list |
 | `net_capture_start` / `net_capture_stop` / `net_capture_status` / `net_flows` | session / iface / replay path | In-process capture session + attributed flows (MCP/GUI; not CLI one-shot reuse) |
-| `net_detect` / `net_alerts` / `net_rules_list` / `net_rules_load` / `net_rules_check` | pcap/rules path / max | In-tree GNR compile + detect + alert index |
+| `net_detect` / `net_alerts` | pcap / optional `rules` / max | GNR/ET detect on a capture; omit `rules` → active pack + `ghidrust-minimal.rules` |
+| `net_rules_list` / `net_rules_load` / `net_rules_check` / `net_rules_update` | path / `from_archive` / `url` / `et_version` / `dest` | List/check packs; one-click ET Open install (same `install_et_open` as CLI/GUI) |
 | `net_pivots` / `net_job_get` | pcap / job id | DNS/TLS/HTTP/SMB pivot fields; dig job status |
 
 #### Live process (Windows)
@@ -647,23 +648,93 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 
 ## Ghidnet (native network plane)
 
-Ghidnet is Ghidrust’s in-tree network investigation plane: **attribute → detect → dig**. It does not vendor foreign capture/IDS products. Outcome target is host investigation that pivots into the same `load` / `analyze` / `decompile` / live-process stack — not packet-UI feature parity with desktop sniffers.
+Ghidnet is Ghidrust’s in-tree network investigation plane: **attribute → detect → dig**. It does not vendor Suricata, Wireshark, Npcap crates, or `suricata-update`. Outcome target is host investigation that pivots into the same `load` / `analyze` / `decompile` / live-process stack — not packet-UI feature parity with desktop sniffers, and not a kernel IPS.
+
+Requires `tool_surface >= 8`. `server_info.network` advertises the plane (`caps` include `et-open` / `ids`). Airgap policy blocks live observe tools (`net_connections`, capture, detect) while still allowing path-only dig. Full agent SOP: [skill/ghidnet.md](skill/ghidnet.md).
 
 ### Pipeline
 
 | Stage | What you get | CLI | MCP |
 |-------|--------------|-----|-----|
 | **Attribute** | TCP/UDP sockets → owning PID/image; interface list | `net connections`, `net owners`, `net ifaces` | `net_connections`, `net_owners`, `net_ifaces` |
-| **Capture / flows** | In-process session, `GRNCAP01` files, replay backend, flow table | `net capture …`, `net flows`, `ghidrust-netcap` | `net_capture_*`, `net_flows` |
-| **Detect** | GNR rules → alerts (in-tree MPM) | `net detect`, `net alerts`, `net rules …` | `net_detect`, `net_alerts`, `net_rules_*` |
+| **Capture / flows** | In-process session, `GRNCAP01` files, **ghidnetcap** live NIC, replay backend, flow table | `net capture …`, `net flows`, `ghidrust-netcap` | `net_capture_*`, `net_flows` |
+| **Rules / ET Open** | Fetch/install Proofpoint ET Open; activate pack; merge with bundled GNR | `net rules update et-open`, `net rules list\|check` | `net_rules_update`, `net_rules_list`, `net_rules_check` |
+| **Detect (IDS)** | Compiled GNR/ET rules → `alert`/`pass`/`drop` records (in-tree matcher) | `net detect`, `net alerts` | `net_detect`, `net_alerts` |
 | **Pivots** | DNS / TLS SNI / HTTP / SMB fields from frames | `net pivots --pcap FILE` | `net_pivots` |
 | **Dig** | Playbook compile/execute; closed-loop from alert → image RE | `net dig`, `net playbook` | `net_dig`, `net_playbook`, `net_job_get` |
 
-Requires `tool_surface >= 8`. `server_info.network` advertises the plane to agents. Airgap policy blocks live observe tools (`net_connections`, capture, detect) while still allowing path-only dig.
+`ghidrust net help` prints the full subcommand list.
+
+### ET Open install (one-click)
+
+Proofpoint **Emerging Threats Open** rules are used **as written**. The in-tree matcher implements a Suricata-shaped subset; SIDs that need unimplemented keywords are **skipped** (counted in the install/list report), not rewritten.
+
+CLI, GUI **Download / update ET Open**, and MCP `net_rules_update` all call the same `install_et_open`:
+
+1. Fetch `emerging.rules.tar.gz` + `.md5` from `https://rules.emergingthreats.net/open` (or `--from-archive` / `from_archive` for airgap/CI).
+2. Verify MD5, extract under the user rules root, write `ghidrust.vars` (`$HTTP_SERVERS=$HOME_NET` and other Suricata aliases).
+3. Point `active.json` at that pack. Detect then compiles **all `*.rules` in the pack plus** [`rules/ghidrust-minimal.rules`](rules/ghidrust-minimal.rules).
+
+```bash
+# Online (default ET Open 7.0.3)
+./target/release/ghidrust net rules update et-open --json
+
+# Airgap / CI: local tarball + sidecar .md5
+./target/release/ghidrust net rules update et-open --from-archive fixtures/et-open-mini.tar.gz --et-version mini --dest DIR --json
+
+./target/release/ghidrust net rules list --json
+# → packs.active, loaded, skipped, skip_reasons[]
+```
+
+Rules root (override with `GHIDRUST_RULES_DIR`):
+
+| OS | Default |
+|----|---------|
+| Windows | `%APPDATA%\ghidrust\rules` |
+| Linux | `$XDG_CONFIG_HOME/ghidrust/rules` or `~/.ghidrust/rules` |
+| Pack layout | `et-open/<version>/` + `active.json` |
+
+Optional `--url` / `--et-version` / `--et-code` (ET Pro oink; never logged). Do not vendor the ~40 MB ET tarball in git; CI uses `fixtures/et-open-mini.tar.gz`.
+
+### Detect (IDS, not kernel IPS)
+
+Without `--rules` / MCP `rules`, detect uses `load_active_ruleset()` (active ET pack + minimal). Explicit `--rules PATH` still compiles that file only.
+
+```bash
+# After ET install — uses active pack
+./target/release/ghidrust net detect --pcap path/to/capture.grncap --json
+./target/release/ghidrust net detect --payload-file fixtures/et-http-gate.bin --json
+
+# Explicit pack
+./target/release/ghidrust net detect --pcap capture.grncap --rules rules/ghidrust-minimal.rules --json
+./target/release/ghidrust net rules check --path rules/ghidrust-minimal.rules --json
+```
+
+| Matcher covers | Skipped (SID not loaded; listed in `skipped` / `skip_reasons`) |
+|----------------|---------------------------------------------------------------|
+| `content` / `pcre`, `nocase`, `distance`/`within` (cursor = previous hit **end**) | `flowbits` / `xbits` / `flowint` |
+| Sticky buffers: `http.uri`/`host`/`method`/`header`, `dns.query`, `tls.sni` | `ja3` / `ja3s` |
+| `flow:established,to_server,to_client` | `lua` / `luajit` |
+| `$HOME_NET` / `$HTTP_SERVERS` / CIDR / IP lists | `threshold` / `detection_filter`; `file-data`; `byte_test`/`byte_jump`; unknown `http.*`/`tls.*` buffers |
+| Actions `alert`, `pass`, `drop` **recorded as alerts** | Kernel/NFQUEUE/WFP block — **not implemented** |
+
+`drop` is an IDS action tag on the alert, not an inline packet drop. Kernel IPS / `GHIDRUST_NET_INLINE=1` inline block is a separate, disabled-by-default gate.
+
+### Capture (ghidnetcap)
+
+`net ifaces` lists OS adapters (Windows `GetAdaptersInfo`; Linux sysfs) plus a `replay` backend. Live open (`net capture start --iface NAME`):
+
+- Windows: optional NPF `CreateFile` if a driver is present; otherwise IPv4 raw sockets (`SIO_RCVALL`). Cargo does **not** link Npcap/WinPcap.
+- Unix: packet sockets.
+- Fail-closed: `privilege_required` or `backend_unavailable`. Never fabricates live frames.
+- `GHIDRUST_NET_LIVE_STUB=1` is test-only and **errors** on live open (does not silently emit empty captures).
+- Prefer `--replay FILE` / MCP `replay_path` in CI.
 
 ### Quick examples
 
 ```bash
+./target/release/ghidrust net help
+
 # Dig playbook from a hint (compile only)
 ./target/release/ghidrust net dig --path fixtures/tiny_x64.pe --json
 
@@ -673,10 +744,8 @@ Requires `tool_surface >= 8`. `server_info.network` advertises the plane to agen
 # Host sockets (Windows IP Helper / Linux /proc)
 ./target/release/ghidrust net connections --json
 ./target/release/ghidrust net owners --pid <PID> --json
+./target/release/ghidrust net ifaces --json
 
-# Detect on a capture file with shipped minimal rules
-./target/release/ghidrust net detect --pcap path/to/capture.grncap --rules rules/ghidrust-minimal.rules --json
-./target/release/ghidrust net rules check --path rules/ghidrust-minimal.rules --json
 ./target/release/ghidrust net pivots --pcap path/to/capture.grncap --json
 ```
 
@@ -690,12 +759,10 @@ Same APIs as CLI/MCP, in-process:
 2. **Connections:** Refresh → select row → **Dig** (fills Dig tab hint)
 3. **Capture:** set iface / replay path → **Start** → **Flows** → **Detect** / **Pivots**
 4. **Alerts:** severity queue → **Dig** (closed-loop when owner path known)
-5. **Rules:** pack path → **Check** (default `rules/ghidrust-minimal.rules`)
+5. **Rules:** **Download / update ET Open** (one-click fetch + activate) → pack path → **Check** (default: active ET pack + `rules/ghidrust-minimal.rules`)
 6. **Dig:** **Compile** / **Execute** → **Open in Listing** (loads image into CodeBrowser)
 
-**Honesty bounds:** live NIC acquisition may be stub/replay-first; capture sessions are process-local. Host header / Help→About show `NetworkInfo` (wave/caps). Capture **Export path** reveals `out_path` (copy + folder). **Inline block** is disabled unless `GHIDRUST_NET_INLINE=1` (hover shows reason).
-
-Shipped rules: [`rules/ghidrust-minimal.rules`](rules/ghidrust-minimal.rules).
+**Honesty bounds:** live NIC needs elevation (`privilege_required` otherwise). Capture sessions are process-local. Host header / Help→About show `NetworkInfo` (wave/caps). Capture **Export path** reveals `out_path` (copy + folder). **Inline block** is disabled unless `GHIDRUST_NET_INLINE=1` (hover shows reason).
 
 ---
 
@@ -759,10 +826,10 @@ MCP equivalents are `crypt_constants`, `recover_strings`, `list_crypto_capabilit
 | `ghidrust-unity-inventory` | Unity player layout inventory (assemblies, plugins, metadata) |
 | `ghidrust-net-schema` | Ghidnet VOs (`NetHint`, `Alert`, `DigPlan`, flows/pivots) |
 | `ghidrust-net-attr` | Host socket → owner (Windows IP Helper / Linux `/proc`) |
-| `ghidrust-net-capture` | Capture sessions, `GRNCAP01`, replay; bin `ghidrust-netcap` |
+| `ghidrust-net-capture` | Capture sessions, `GRNCAP01`, ghidnetcap live NIC, replay; bin `ghidrust-netcap` |
 | `ghidrust-net-flow` | Flow table, reassembly, filters |
-| `ghidrust-net-rules` | GNR dialect parse/compile |
-| `ghidrust-net-detect` | In-tree MPM + alerts; optional inline via `GHIDRUST_NET_INLINE` |
+| `ghidrust-net-rules` | GNR/Suricata-shaped parse/compile, ET Open install, active pack + `$HOME_NET` aliases |
+| `ghidrust-net-detect` | In-tree matcher (sticky buffers, pcre, distance/within); IDS `alert`/`pass`/`drop` records; optional inline via `GHIDRUST_NET_INLINE` |
 | `ghidrust-net-parse` | DNS / TLS SNI / HTTP / SMB pivot extractors |
 | `ghidrust-net-correlate` | Dig playbooks + closed-loop alert → RE |
 | `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` / `decompile-bench` / `net …` |

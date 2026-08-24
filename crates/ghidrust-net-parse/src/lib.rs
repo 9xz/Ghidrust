@@ -5,6 +5,10 @@ mod http;
 mod smb;
 mod tls;
 
+pub use dns::parse_qnames;
+pub use http::{parse_request, parse_request_ex, HttpRequest};
+pub use tls::parse_client_hello;
+
 use ghidrust_net_schema::PivotFields;
 
 /// Extract pivot fields from a payload or capture blob.

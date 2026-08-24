@@ -75,7 +75,11 @@ impl GhidrustApp {
                             if ui.button("Parse C Source…").clicked() {
                                 if let Some(path) = rfd::FileDialog::new().add_filter("C source", &["c", "h"]).pick_file() {
                                     match std::fs::read_to_string(&path) {
-                                        Ok(text) => { let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string(); let _ = self.define_user_type(name.clone(), format!("C source stub from {}\n{text}", path.display())); self.status = format!("Imported C source stub {name} into Program types"); self.log(self.status.clone()); }
+                                        Ok(text) => {
+                                            if let Err(e) = self.tools_parse_c_source_text(&text) {
+                                                self.log_error(e);
+                                            }
+                                        }
                                         Err(e) => self.log_error(e.to_string()),
                                     }
                                 }
@@ -410,14 +414,21 @@ impl GhidrustApp {
                             if ui.button("Compare Program…").clicked() {
                                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                                     match load_path(&path) {
-                                        Ok(other) => { self.show_tools_dialog = true; self.tools_dialog_title = "Program comparison".into(); self.tools_dialog_body = format!("{} sections / {} symbols\n{} sections / {} symbols", self.program.as_ref().map(|p| p.sections.len()).unwrap_or(0), self.program.as_ref().map(|p| p.analysis.symbols.len()).unwrap_or(0), other.sections.len(), other.analysis.symbols.len()); }
+                                        Ok(other) => { let _ = self.tools_diff_with(&other); }
                                         Err(e) => self.log_error(e.to_string()),
                                     }
                                 }
                                 ui.close_menu();
                             }
                             if ui.button("Program Differences…").clicked() {
-                                self.show_tools_dialog = true; self.tools_dialog_title = "Program differences".into(); self.tools_dialog_body = self.program.as_ref().map(|p| format!("Sections: {}\nSymbols: {}\nFunctions: {}", p.sections.len(), p.analysis.symbols.len(), p.analysis.functions.len())).unwrap_or_else(|| "No program loaded".into());
+                                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                    match load_path(&path) {
+                                        Ok(other) => { let _ = self.tools_diff_with(&other); }
+                                        Err(e) => self.log_error(e.to_string()),
+                                    }
+                                } else {
+                                    self.status = "Program Differences: pick a second program to diff".into();
+                                }
                                 ui.close_menu();
                             }
                             if ui
@@ -448,19 +459,11 @@ impl GhidrustApp {
                                 ui.close_menu();
                             }
                             if ui.button("Create Function").clicked() {
-                                if let Some(va) = self.listing_focus_va {
-                                    self.show_tools_dialog = true;
-                                    self.tools_dialog_title = "Create Function".into();
-                                    self.tools_dialog_body = format!("Function creation requested at {va:#x}. Use Analysis to discover and persist functions.");
-                                } else {
-                                    self.status = "Select a listing address first".into();
-                                }
+                                let _ = self.tools_create_function();
                                 ui.close_menu();
                             }
                             if ui.button("VTable Probe").clicked() {
-                                self.show_tools_dialog = true;
-                                self.tools_dialog_title = "VTable Probe".into();
-                                self.tools_dialog_body = format!("Recovered RTTI classes: {}", self.rtti.classes.len());
+                                let _ = self.tools_vtable_probe();
                                 ui.close_menu();
                             }
                             if ui.button("Decode Support").clicked() {

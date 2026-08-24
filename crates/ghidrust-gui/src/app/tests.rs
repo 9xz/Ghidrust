@@ -502,6 +502,12 @@ fn shell_has_required_menus_and_panes() {
         assert!(both.contains("run_search_text"));
         assert!(both.contains("select_all_listing"));
         assert!(both.contains("show_processor_dialog"));
+        assert!(both.contains("tools_create_function"));
+        assert!(both.contains("tools_vtable_probe"));
+        assert!(both.contains("tools_parse_c_source"));
+        assert!(!src.contains("Function creation requested"));
+        assert!(!src.contains("Recovered RTTI classes"));
+        assert!(!src.contains("Imported C source stub"));
     }
 
     #[test]
@@ -1505,5 +1511,103 @@ fn shell_has_required_menus_and_panes() {
         assert_eq!(app.appearance.display_name(), "Classic Ghidrust");
         let t = app.tokens();
         assert_eq!(t.primary[0], 0xD0);
+    }
+
+    #[test]
+    fn tools_create_function_persists_entry_and_end_on_fixture() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let entry = app.program.as_ref().and_then(|p| p.entry).expect("entry");
+        app.listing_focus_va = Some(entry);
+        let created = app.tools_create_function().expect("create function");
+        assert_eq!(created.entry, entry);
+        assert!(
+            created.end > created.entry,
+            "expected real end bound, got [{:#x}, {:#x})",
+            created.entry,
+            created.end
+        );
+        let stored = app
+            .program
+            .as_ref()
+            .and_then(|p| p.function_at(entry).cloned())
+            .expect("function persisted on Program.analysis");
+        assert_eq!(stored.entry, created.entry);
+        assert_eq!(stored.end, created.end);
+        assert!(stored.end > stored.entry);
+        assert!(app.tools_dialog_body.contains(&format!("{entry:#x}")));
+        assert!(!app.tools_dialog_body.contains("Function creation requested"));
+    }
+
+    #[test]
+    fn tools_vtable_probe_without_session_is_honest_error() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        app.listing_focus_va = Some(entry);
+        let err = app.tools_vtable_probe().expect_err("no session");
+        assert!(
+            err.to_lowercase().contains("session"),
+            "honest no-session error, got {err}"
+        );
+        assert!(!err.contains("Recovered RTTI classes"));
+        assert!(!app.tools_dialog_body.contains("Recovered RTTI classes"));
+        assert!(app.tools_dialog_body.to_lowercase().contains("session"));
+        assert!(app.status.to_lowercase().contains("session"));
+    }
+
+    #[test]
+    fn parse_c_source_persists_named_types_with_fields() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let src = r#"
+            struct Widget { int id; char *name; };
+            typedef unsigned int u32;
+            enum Color { RED, GREEN };
+            int draw(struct Widget *w, int flags);
+        "#;
+        let n = app.tools_parse_c_source_text(src).expect("parse");
+        assert!(n >= 4, "parsed {n}");
+        assert!(!app.status.contains("no C parser"));
+        let prog = app.program.as_ref().unwrap();
+        assert!(prog.edits.parsed_types.contains_key("Widget"));
+        let w = prog.edits.parsed_types.get("Widget").unwrap();
+        assert!(w.members.iter().any(|m| m.name == "id"));
+        assert!(prog.edits.user_types.get("Widget").unwrap().contains("id"));
+        assert!(prog.edits.parsed_types.contains_key("u32"));
+        assert!(prog.edits.parsed_types.contains_key("Color"));
+        let d = prog.edits.parsed_types.get("draw").unwrap();
+        assert!(!d.members.is_empty());
+    }
+
+    #[test]
+    fn tools_diff_is_not_count_only() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let mut other = ghidrust_core::load_path(fixture_path("tiny_x64.pe")).unwrap();
+        if let Some(b) = other.blocks.first_mut() {
+            if !b.bytes.is_empty() {
+                b.bytes[0] ^= 0xff;
+            }
+        }
+        let text = app.tools_diff_with(&other);
+        assert!(!text.contains("Sections:"), "{text}");
+        assert!(
+            text.contains("0x") || text.contains("function") || text.contains("section"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn persist_register_writes_program_edits() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        app.persist_register("RAX", "0xdead").expect("persist");
+        let v = app
+            .program
+            .as_ref()
+            .and_then(|p| p.edits.register("RAX"))
+            .expect("stored");
+        assert_eq!(v, "0xdead");
     }
 

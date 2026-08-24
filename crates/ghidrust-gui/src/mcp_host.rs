@@ -232,13 +232,15 @@ pub fn cli_args_for_tool(tool: &str, args: &Value) -> Option<Vec<String>> {
         "get_xrefs_to" => {
             let p = path?;
             let a = addr?;
-            Some(vec![
-                "xrefs".into(),
-                p.into(),
-                "--to".into(),
-                a.into(),
-                "--json".into(),
-            ])
+            let mut v = vec!["xrefs".into(), p.into(), "--to".into(), a.into()];
+            if args.get("skip_stubs").and_then(|x| x.as_bool()) == Some(true) {
+                v.push("--skip-stubs".into());
+            }
+            if args.get("classify").and_then(|x| x.as_bool()) == Some(true) {
+                v.push("--classify".into());
+            }
+            push_json(&mut v);
+            Some(v)
         }
         "get_xrefs_from" => {
             let p = path?;
@@ -745,5 +747,34 @@ mod tests {
     fn reject_net_tools() {
         assert!(reject_net("net_dig").is_err());
         assert!(reject_net("load").is_ok());
+    }
+
+    #[test]
+    fn get_xrefs_to_forwards_skip_stubs_and_classify() {
+        let args = cli_args_for_tool(
+            "get_xrefs_to",
+            &json!({
+                "path": "x.pe",
+                "addr": "0x140001000",
+                "skip_stubs": true,
+                "classify": true
+            }),
+        )
+        .unwrap();
+        assert_eq!(args[0], "xrefs");
+        assert!(args.iter().any(|a| a == "--skip-stubs" || a == "-skip-stubs"));
+        assert!(args.iter().any(|a| a == "--classify" || a == "-classify"));
+        assert!(args.iter().any(|a| a == "--json" || a == "-json"));
+    }
+
+    #[test]
+    fn get_xrefs_to_omits_optional_flags_when_unset() {
+        let args = cli_args_for_tool(
+            "get_xrefs_to",
+            &json!({ "path": "x.pe", "addr": "0x140001000" }),
+        )
+        .unwrap();
+        assert!(!args.iter().any(|a| a.contains("skip-stubs")));
+        assert!(!args.iter().any(|a| a.contains("classify")));
     }
 }

@@ -101,10 +101,15 @@ pub struct ProgramEdits {
     /// Function-signature edits keyed by function entry VA.
     #[serde(default)]
     pub function_signatures: BTreeMap<u64, FunctionSignatureEdit>,
-    /// User-defined data types.
-    /// Stage-0 stores as strings; later upgrades to a parsed structure.
+    /// User-defined data types (pretty bodies for DTM).
     #[serde(default)]
     pub user_types: BTreeMap<String, String>,
+    /// Structured C-parser output (name → fields/members).
+    #[serde(default)]
+    pub parsed_types: BTreeMap<String, crate::cparse::ParsedType>,
+    /// Register values persisted on the program (Register Manager).
+    #[serde(default)]
+    pub register_values: BTreeMap<String, String>,
     /// User-applied types at specific VAs (Listing "Data Type" apply).
     #[serde(default)]
     pub applied_types: BTreeMap<u64, String>,
@@ -279,6 +284,23 @@ impl ProgramEdits {
     /// Define / redefine a user data type (DTM `New Structure` / `New Enum`).
     pub fn set_user_type(&mut self, name: impl Into<String>, desc: impl Into<String>) {
         self.user_types.insert(name.into(), desc.into());
+    }
+
+    /// Apply C parser output: structured members + DTM pretty bodies.
+    pub fn apply_parsed_c(&mut self, types: Vec<crate::cparse::ParsedType>) {
+        for t in types {
+            let body = crate::cparse::format_type_body(&t);
+            self.user_types.insert(t.name.clone(), body);
+            self.parsed_types.insert(t.name.clone(), t);
+        }
+    }
+
+    pub fn set_register(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.register_values.insert(name.into(), value.into());
+    }
+
+    pub fn register(&self, name: &str) -> Option<&str> {
+        self.register_values.get(name).map(String::as_str)
     }
 
     /// Look up the stored body for a user type by name.

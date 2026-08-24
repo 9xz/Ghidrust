@@ -26,7 +26,8 @@ use crate::nav::NavLocation;
 use crate::panes::{Bookmark, BookmarkKind, PaneKind};
 use eframe::egui::{self, Color32};
 use ghidrust_core::{
-    arch_mode_for_program, default_arch_mode, xrefs_from, xrefs_to, Arch, XRef,
+    arch_mode_for_program, create_function, default_arch_mode, process_vtable_probe, xrefs_from,
+    xrefs_to, Arch, FunctionInfo, XRef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1154,6 +1155,145 @@ impl GhidrustApp {
             .spawn()
             .map_err(|e| e.to_string())?;
         self.status = format!("Opened printable listing {}", path.display());
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Tools → Create Function: same mutation as `ghidrust function create`.
+    pub fn tools_create_function(&mut self) -> Result<FunctionInfo, String> {
+        let va = self
+            .listing_focus_va
+            .ok_or_else(|| "Select a listing address first".to_string())?;
+        self.tools_create_function_at(va)
+    }
+
+    /// Create/heal a function at `va` on the loaded program and persist it.
+    pub fn tools_create_function_at(&mut self, va: u64) -> Result<FunctionInfo, String> {
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let f = create_function(prog, va, None);
+        if f.end <= f.entry {
+            return Err(format!(
+                "create_function produced empty range [{:#x}, {:#x})",
+                f.entry, f.end
+            ));
+        }
+        self.status = format!(
+            "Created {} [{:#x}, {:#x}) seed_kind={:?}",
+            f.name, f.entry, f.end, f.seed_kind
+        );
+        self.show_tools_dialog = true;
+        self.tools_dialog_title = "Create Function".into();
+        self.tools_dialog_body = self.status.clone();
+        self.log(self.status.clone());
+        Ok(f)
+    }
+
+    /// Tools → VTable Probe: live `process_vtable_probe` when a debug session exists.
+    pub fn tools_vtable_probe(&mut self) -> Result<String, String> {
+        let Some(sid) = self.debugger.session.as_ref().map(|s| s.session_id.clone()) else {
+            let msg = "VTable Probe: no debug session (attach or launch a process first)".to_string();
+            self.status = msg.clone();
+            self.show_tools_dialog = true;
+            self.tools_dialog_title = "VTable Probe".into();
+            self.tools_dialog_body = msg.clone();
+            self.log_error(msg.clone());
+            return Err(msg);
+        };
+        let va = match self
+            .listing_focus_va
+            .or_else(|| self.program.as_ref().and_then(|p| p.entry))
+        {
+            Some(va) => va,
+            None => {
+                let msg = "VTable Probe: select a listing address first".to_string();
+                self.status = msg.clone();
+                self.log_warn(msg.clone());
+                return Err(msg);
+            }
+        };
+        match process_vtable_probe(&sid, va, 32) {
+            Ok(r) => {
+                let body = serde_json::to_string_pretty(&r).unwrap_or_else(|_| format!("{r:?}"));
+                self.status = format!(
+                    "VTable probe object={:#x} vtable={:#x} slots={}",
+                    r.object_va,
+                    r.vtable_va,
+                    r.slots.len()
+                );
+                self.show_tools_dialog = true;
+                self.tools_dialog_title = "VTable Probe".into();
+                self.tools_dialog_body = body.clone();
+                self.log(self.status.clone());
+                Ok(body)
+            }
+            Err(e) => {
+                let msg = format!("VTable Probe: {e}");
+                self.status = msg.clone();
+                self.show_tools_dialog = true;
+                self.tools_dialog_title = "VTable Probe".into();
+                self.tools_dialog_body = msg.clone();
+                self.log_error(msg.clone());
+                Err(msg)
+            }
+        }
+    }
+
+    /// File → Parse C Source: hand-rolled header parser → Program types.
+    pub fn tools_parse_c_source_text(&mut self, src: &str) -> Result<usize, String> {
+        let types = ghidrust_core::parse_c_source(src).map_err(|e| e.to_string())?;
+        let n = types.len();
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        prog.edits.apply_parsed_c(types);
+        self.status = format!("Parse C Source: {n} type(s) into Program");
+        self.show_tools_dialog = true;
+        self.tools_dialog_title = "Parse C Source".into();
+        self.tools_dialog_body = self.status.clone();
+        self.log(self.status.clone());
+        Ok(n)
+    }
+
+    /// Tools → Compare / Program Differences.
+    pub fn tools_diff_with(&mut self, other: &ghidrust_core::Program) -> String {
+        let Some(prog) = self.program.as_ref() else {
+            let msg = "no program loaded".to_string();
+            self.status = msg.clone();
+            return msg;
+        };
+        let d = ghidrust_core::diff_programs(prog, other);
+        let text = d.render();
+        self.status = format!(
+            "Program diff: {} byte / {} fn / {} section deltas",
+            d.byte_diffs.len(),
+            d.unmatched_functions_left.len() + d.unmatched_functions_right.len(),
+            d.unmatched_sections_left.len() + d.unmatched_sections_right.len()
+        );
+        self.show_tools_dialog = true;
+        self.tools_dialog_title = "Program differences".into();
+        self.tools_dialog_body = text.clone();
+        self.log(self.status.clone());
+        text
+    }
+
+    pub fn persist_register(&mut self, name: &str, value: &str) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        prog.edits.set_register(name, value);
+        self.register_manager.values.retain(|r| r.register != name);
+        self.register_manager.values.push(crate::register_manager::RegisterValueRow {
+            register: name.into(),
+            start_va: 0,
+            end_va: u64::MAX,
+            value: value.into(),
+        });
+        self.status = format!("Register {name} = {value} (persisted on program)");
         self.log(self.status.clone());
         Ok(())
     }

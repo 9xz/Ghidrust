@@ -1,6 +1,8 @@
 //! Capture session lifecycle.
 
-use crate::acq::{CaptureBackend, CaptureError, LiveStubBackend, ReplayBackend};
+use crate::acq::{
+    enumerate_os_ifaces, open_live, CaptureBackend, CaptureError, LiveStubBackend, ReplayBackend,
+};
 use crate::file::{write_frames, CAPTURE_MAGIC};
 use ghidrust_net_flow::{CaptureFilter, FlowTable, Frame};
 use ghidrust_net_schema::{AttributedFlow, CaptureSessionInfo, Owner};
@@ -51,7 +53,7 @@ struct Session {
     #[allow(dead_code)]
     backend_name: String,
     replay: Option<ReplayBackend>,
-    live: Option<LiveStubBackend>,
+    live: Option<Box<dyn CaptureBackend + Send>>,
     finished: bool,
 }
 
@@ -66,10 +68,24 @@ fn with_sessions<R>(f: impl FnOnce(&mut HashMap<String, Session>) -> R) -> R {
 }
 
 pub fn list_interfaces() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({"name": "loopback", "description": "Local loopback"}),
-        serde_json::json!({"name": "replay", "description": "Fixture replay backend"}),
-    ]
+    let mut v: Vec<serde_json::Value> = enumerate_os_ifaces()
+        .into_iter()
+        .map(|i| {
+            serde_json::json!({
+                "name": i.name,
+                "description": i.description,
+                "ipv4": i.ipv4,
+                "guid": i.guid,
+                "kind": "os",
+            })
+        })
+        .collect();
+    v.push(serde_json::json!({
+        "name": "replay",
+        "description": "Fixture replay backend",
+        "kind": "replay",
+    }));
+    v
 }
 
 pub fn capture_start(req: CaptureStartRequest) -> Result<CaptureStartResult, CaptureError> {
@@ -111,8 +127,20 @@ pub fn capture_start(req: CaptureStartRequest) -> Result<CaptureStartResult, Cap
         return Err(CaptureError::unavailable(
             "replay iface requires replay_path",
         ));
+    } else if std::env::var("GHIDRUST_NET_LIVE_STUB").ok().as_deref() == Some("1") {
+        (
+            None,
+            Some(Box::new(LiveStubBackend::new()) as Box<dyn CaptureBackend + Send>),
+            "live_stub".to_string(),
+        )
     } else {
-        (None, Some(LiveStubBackend::new()), "live_stub".to_string())
+        let backend = open_live(req.iface.as_deref())?;
+        let name = backend.name().to_string();
+        (
+            None,
+            Some(Box::new(backend) as Box<dyn CaptureBackend + Send>),
+            name,
+        )
     };
 
     let info = CaptureSessionInfo {
@@ -164,11 +192,7 @@ fn capture_pump(session_id: &str) -> Result<(), CaptureError> {
         let frames = if let Some(b) = s.replay.as_mut() {
             b.poll_frames()?
         } else if let Some(b) = s.live.as_mut() {
-            match b.poll_frames() {
-                Ok(f) => f,
-                Err(e) if e.code == "backend_unavailable" => Vec::new(),
-                Err(e) => return Err(e),
-            }
+            b.poll_frames()?
         } else {
             Vec::new()
         };
@@ -303,6 +327,46 @@ mod tests {
         assert!(Path::new(info.out_path.as_ref().unwrap()).is_file());
         assert!(std::fs::metadata(info.out_path.as_ref().unwrap()).unwrap().len() > 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_interfaces_is_not_only_hardcoded_placeholders() {
+        let v = list_interfaces();
+        assert!(!v.is_empty());
+        let names: Vec<String> = v
+            .iter()
+            .filter_map(|x| x.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert!(names.iter().any(|n| n == "replay"), "replay stays listed");
+        let os_only: Vec<_> = names.iter().filter(|n| *n != "replay").cloned().collect();
+        if !os_only.is_empty() {
+            assert!(
+                os_only.iter().any(|n| n != "loopback"),
+                "OS enum must surface real adapters, got {os_only:?}"
+            );
+        } else {
+            // Enum failed — live open must be fail-closed, not live_stub success.
+            let err = crate::open_live(None).unwrap_err();
+            assert!(err.code == "privilege_required" || err.code == "backend_unavailable");
+        }
+    }
+
+    #[test]
+    fn live_capture_start_is_not_silent_stub() {
+        if std::env::var("GHIDRUST_NET_LIVE_STUB").ok().as_deref() == Some("1") {
+            return;
+        }
+        match capture_start(CaptureStartRequest {
+            iface: Some("no-such-ghidnetcap-iface-xyz".into()),
+            ..Default::default()
+        }) {
+            Ok(s) => panic!("unknown iface must not start a session (backend={})", s.backend),
+            Err(e) => assert!(
+                e.code == "backend_unavailable" || e.code == "privilege_required",
+                "{}",
+                e.code
+            ),
+        }
     }
 
     #[test]

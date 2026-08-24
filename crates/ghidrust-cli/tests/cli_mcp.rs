@@ -346,9 +346,16 @@ fn mcp_server_info_and_live_tools() {
         "inventory",
         "il2cpp_touch_map",
         "function_create",
+        "net_rules_update",
+        "net_rules_list",
+        "net_detect",
     ] {
         assert!(s.contains(tool), "missing {tool} in {s}");
     }
+    assert!(
+        s.contains("et-open") || s.contains("\"et-open\""),
+        "initialize/server_info missing et-open network cap: {s}"
+    );
     // tool_surface must be at least 3 (touch-map / body_class / function_create surface)
     let surface_ok = s.contains("\"toolSurface\":3")
         || s.contains("\"tool_surface\": 3")

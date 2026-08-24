@@ -162,8 +162,13 @@ mod tests {
         assert!(is_network_observe_tool("net_connections"));
         assert!(!is_network_observe_tool("net_dig"));
         assert!(!is_network_observe_tool("net_playbook"));
+        assert!(!is_network_observe_tool("net_rules_update"));
+        assert!(!is_network_observe_tool("net_rules_list"));
+        assert!(!is_network_observe_tool("net_rules_check"));
         assert!(!network_tool_allowed(AgentMode::Airgap, "net_capture_start"));
         assert!(network_tool_allowed(AgentMode::ReadOnly, "net_capture_start"));
         assert!(network_tool_allowed(AgentMode::Airgap, "net_dig"));
+        assert!(network_tool_allowed(AgentMode::Airgap, "net_rules_update"));
+        assert!(network_tool_allowed(AgentMode::Airgap, "net_rules_list"));
     }
 }

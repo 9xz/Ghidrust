@@ -329,6 +329,39 @@ mod tests {
         let rep = run_analyzers_opts(&mut prog, &["Not A Real Analyzer"], true).expect("opts");
         assert_eq!(rep.results.len(), 1);
         assert_eq!(rep.results[0].status, "error");
+        assert!(
+            rep.results[0].message.contains("unknown analyzer"),
+            "{}",
+            rep.results[0].message
+        );
+        assert!(
+            !rep.results[0].message.contains("unwired analyzer"),
+            "unknown names must not use the unwired-catalog label: {}",
+            rep.results[0].message
+        );
         assert!(!rep.results[0].message.contains("gpu_enrich"));
+    }
+
+    #[test]
+    fn registered_analyzer_names_never_emit_unwired() {
+        for name in ANALYZER_NAMES {
+            let mut prog = load_path(fixture_path("tiny_x64.pe")).expect("pe");
+            let rep = run_analyzers(&mut prog, &[*name]).expect("run");
+            assert_eq!(rep.results.len(), 1, "{name}");
+            assert!(
+                !rep.results[0].message.contains("unwired analyzer"),
+                "{name}: {}",
+                rep.results[0].message
+            );
+            assert_eq!(
+                rep.results[0].status, "ok",
+                "{name}: {}",
+                rep.results[0].message
+            );
+            assert!(
+                !rep.results[0].message.is_empty(),
+                "{name} empty primary message"
+            );
+        }
     }
 }

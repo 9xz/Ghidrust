@@ -1,8 +1,13 @@
 //! Frame acquisition backends.
 
+pub mod ghidnetcap;
+pub mod pkt;
+
 use ghidrust_net_flow::Frame;
 use ghidrust_net_schema::Owner;
 use serde::{Deserialize, Serialize};
+
+pub use ghidnetcap::{enumerate_os_ifaces, open_live, GhidnetcapBackend, IfaceInfo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureError {

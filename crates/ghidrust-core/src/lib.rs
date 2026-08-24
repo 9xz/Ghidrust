@@ -3,6 +3,8 @@
 pub mod analyzers;
 pub mod artifacts;
 pub mod bounds_honesty;
+pub mod cparse;
+pub mod diff;
 pub mod bulk_scan;
 pub mod callsite_hints;
 pub mod crypto_pipeline;
@@ -17,6 +19,7 @@ pub mod inflate;
 pub mod inventory;
 pub mod io_util;
 pub mod machine;
+pub mod macho;
 pub mod pe;
 pub mod pe_functions;
 pub mod process;
@@ -53,7 +56,9 @@ pub use bulk_scan::{
     set_preferred_bulk_mode, time_bulk_printable, BulkBackend, BulkHit, BulkScanMode,
     BulkTimingReport, GpuScanReport, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT,
 };
+pub use cparse::{format_type_body, parse_c_source, ParsedMember, ParsedType};
 pub use callsite_hints::{collect_callsite_hints, CallsiteArg, CallsiteHint};
+pub use diff::{diff_programs, ByteDiff, ProgramDiff};
 pub use crypto_pipeline::{recover_function_seeds, run_crypto_pipeline, suggest_recipe_for_hint};
 pub use decode_bake::{bake, extract_iocs, magic, magic_with_crib, BakeOp, BakeResult};
 pub use disasm::{
@@ -83,6 +88,7 @@ pub use inventory::{
     PeInventoryEntry, VersionInfo, PE_INVENTORY_SCHEMA,
 };
 pub use io_util::{sanitize_path_component, sanitized_out_name, write_json_no_bom};
+pub use macho::{is_macho, load_macho, tiny_x64_bytes as macho_tiny_x64_bytes};
 pub use machine::{
     arch_mode_for_program, arch_mode_from_elf_emachine, arch_mode_from_pe_machine,
     default_arch_mode, elf_class_from_bytes, elf_emachine_from_bytes, pe_machine_from_bytes,
@@ -141,9 +147,11 @@ pub fn load_bytes(data: &[u8], name: impl Into<String>) -> Result<Program> {
         pe::load_pe(data, name)
     } else if elf::is_elf(data) {
         elf::load_elf(data, name)
+    } else if macho::is_macho(data) {
+        macho::load_macho(data, name)
     } else {
         Err(Error::UnsupportedFormat(
-            "not a PE or ELF image (bad magic)".into(),
+            "not a PE, ELF, or Mach-O image (bad magic)".into(),
         ))
     }
 }

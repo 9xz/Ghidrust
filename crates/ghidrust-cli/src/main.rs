@@ -53,7 +53,8 @@ const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `5` = decode engine surface (decode_support, decode_query, extended disassemble).
 /// `6` = crypt_constants, recover_strings, decode_bake/magic, crypto_capabilities.
 /// `7` = live process debug bridge (break/step/regs/stack/scan/watch).
-/// `8` = native network dig / connections / capture / detect / pivots.
+/// `8` = native network dig / connections / capture / detect / pivots /
+/// ET Open install (`net_rules_update`) / IDS detect (`alert`/`pass`/`drop` records).
 const TOOL_SURFACE_VERSION: u32 = 8;
 
 fn package_version() -> &'static str {
@@ -90,9 +91,20 @@ fn server_info_json() -> Value {
     "net_dig",
     "net_playbook",
     "net_connections",
+    "net_owners",
+    "net_ifaces",
     "net_capture_start",
+    "net_capture_stop",
+    "net_capture_status",
+    "net_flows",
     "net_detect",
-    "net_pivots"
+    "net_alerts",
+    "net_rules_list",
+    "net_rules_load",
+    "net_rules_check",
+    "net_rules_update",
+    "net_pivots",
+    "net_job_get"
                ],
     "decode_diet": decode_block["features"]["decode_diet"],
     "x86_reduce": decode_block["features"]["x86_reduce"],
@@ -314,7 +326,10 @@ fn print_help() {
                     break|continue|pause|wait|step|threads|regs|stack|scan|watch|vtable|snapshot … [--json]\n\
              # attach/launch: -mode observe|debug; launch debug: -break-at-entry\n\
            ghidrust net dig|playbook|connections|owners|ifaces|capture|flows|detect|alerts|rules|pivots … [--json]\n\
-             # Ghidnet (tool_surface>=8): attribute → detect → dig; see README Ghidnet\n\
+             # Ghidnet (tool_surface>=8): attribute → detect → dig; `ghidrust net help`\n\
+             #   net rules update et-open [--from-archive FILE] [--et-version V] [--url URL] [--dest DIR]\n\
+             #   net detect --pcap FILE [--rules PATH]   # default: active ET pack + ghidrust-minimal\n\
+             #   net capture start [--iface NAME|--replay FILE]  # live = ghidnetcap; privilege_required if unprivileged\n\
            ghidrust rtti <path> [--filter|--name|--exact] [--match MODE] [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
@@ -4083,12 +4098,12 @@ description: "Auto-detect a short peel chain (depth 1..4) maximizing printable r
         },
         ToolDef {
             name: "net_ifaces",
-            description: "List capture interfaces / backends",
+            description: "List OS adapters (ghidnetcap) plus the replay backend",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
             name: "net_capture_start",
-            description: "Start native capture session (replay_path for fixtures; airgap refuses)",
+            description: "Start ghidnetcap live or replay capture (replay_path for fixtures; live fail-closed privilege_required; airgap refuses)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4133,7 +4148,7 @@ description: "Auto-detect a short peel chain (depth 1..4) maximizing printable r
         },
         ToolDef {
             name: "net_detect",
-            description: "Run native GNR rules on a capture file / payload blob",
+            description: "Run GNR/ET Open rules on a capture file. Omit rules to use the active pack (ET Open + ghidrust-minimal). IDS alerts only — drop is not kernel IPS.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4154,7 +4169,7 @@ description: "Auto-detect a short peel chain (depth 1..4) maximizing printable r
         },
         ToolDef {
             name: "net_rules_list",
-            description: "List bundled/native rule packs",
+            description: "List active ET Open pack + bundled ghidrust-minimal (loaded/skipped counts)",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
@@ -4173,6 +4188,19 @@ description: "Auto-detect a short peel chain (depth 1..4) maximizing printable r
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "net_rules_update",
+            description: "Download/install Proofpoint ET Open (or from_archive) and activate as the detect pack. Same function as CLI net rules update et-open and GUI Download / update ET Open.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from_archive": { "type": "string" },
+                    "url": { "type": "string" },
+                    "et_version": { "type": "string" },
+                    "dest": { "type": "string" }
+                }
             }),
         },
         ToolDef {
@@ -4262,7 +4290,8 @@ fn run_mcp_stdio() -> ExitCode {
                 "serverInfo": {
                 "name": "ghidrust",
                 "version": package_version(),
-                "toolSurface": TOOL_SURFACE_VERSION
+                "toolSurface": TOOL_SURFACE_VERSION,
+                "network": net_cmds::network_info_json()
                                        }
                                    }
                                })
