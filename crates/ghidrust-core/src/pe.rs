@@ -64,7 +64,8 @@ pub fn load_pe(data: &[u8], name: impl Into<String>) -> Result<Program> {
     let sec_table = opt + opt_size;
     let mut prog = Program::new(name.into(), if is_pe32plus { "PE32+" } else { "PE32" });
     prog.image_base = image_base;
-    prog.entry = Some(image_base.wrapping_add(entry_rva));
+    // A zero AddressOfEntryPoint is valid for a resource-only or /NOENTRY DLL.
+    prog.entry = (entry_rva != 0).then(|| image_base.wrapping_add(entry_rva));
     prog.file_bytes = data.to_vec();
 
     for i in 0..num_sections {
@@ -119,4 +120,20 @@ pub fn load_pe(data: &[u8], name: impl Into<String>) -> Result<Program> {
     }
 
     Ok(prog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_entry_dll_does_not_seed_a_function_at_the_image_base() {
+        let mut bytes = std::fs::read(crate::fixture_path("tiny_x64.pe")).unwrap();
+        let optional_header = rdu32(&bytes, 0x3c).unwrap() as usize + 4 + 20;
+        bytes[optional_header + 16..optional_header + 20].fill(0);
+        let mut program = load_pe(&bytes, "no-entry.dll").unwrap();
+        assert_eq!(program.entry, None);
+        crate::run_analyzers(&mut program, &["Function Start Search"]).unwrap();
+        assert!(program.analysis.functions.iter().all(|f| f.entry != program.image_base));
+    }
 }

@@ -10,6 +10,10 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 
 Includes custom GPU kernels to conduct decompiling at lightning speed, this feature is experimental and in development.
 
+This fork supports CPU-only decompiler library builds without GPU dependencies.
+PE images with a zero `AddressOfEntryPoint` are represented without an entry point;
+function discovery does not invent a function at the image base for `/NOENTRY` DLLs.
+
 ---
 
 ## What it aims to achieve
