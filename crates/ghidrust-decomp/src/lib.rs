@@ -28,24 +28,24 @@ pub mod ir_emit;
 pub mod stage1;
 
 pub use bench::{
-    bench_functions, bench_program, bench_program_stage1, bench_program_stage1_parallel,
-    BenchReport, FunctionBench,
+    BenchReport, FunctionBench, bench_functions, bench_program, bench_program_stage1,
+    bench_program_stage1_parallel,
 };
 pub use emit_hints::EmitHints;
 pub use emit_tokens::{EmitToken, EmitTokenKind};
 pub use ghidra_oracle::{
-    compare as ghidra_headtohead, shared_entry_list, spawn_ghidra_headless, token_similarity,
     CapturedGhidraDecompile, GhidraOracleConfig, GhidraOracleReport, GhidraSpawnError,
-    GhidrustCallConv, GhidrustStage, MatchKind, StructuralMatch,
+    GhidrustCallConv, GhidrustStage, MatchKind, StructuralMatch, compare as ghidra_headtohead,
+    shared_entry_list, spawn_ghidra_headless, token_similarity,
 };
-pub use goto_histogram::{goto_rate_histogram, GotoHistogram};
+pub use goto_histogram::{GotoHistogram, goto_rate_histogram};
 pub use stage1::{
-    emit_stage1, emit_stage1_full, emit_stage1_with_hints, is_structured, Stage1Result,
-    Stage1Summary,
+    SourceSpan, Stage1Result, Stage1Summary, emit_stage1, emit_stage1_full, emit_stage1_with_hints,
+    is_structured,
 };
 
-use ghidrust_core::{disassemble_range, Instruction, Program};
-use ghidrust_lift::{coverage as lift_coverage, lift_instructions, LiftCoverage};
+use ghidrust_core::{Instruction, Program, disassemble_range};
+use ghidrust_lift::{LiftCoverage, coverage as lift_coverage, lift_instructions};
 use ghidrust_structure::{StructureHints, SwitchHint};
 use ghidrust_types::CallConv;
 use serde::Serialize;
@@ -95,11 +95,11 @@ pub fn stage1_commit_strings(stage1: &Stage1Result) -> (String, Vec<String>, Vec
 }
 
 pub use gpu_decompile::{
-    bench_vram_decompile_vs_cpu, classic_mnemonic_to_op, decode_gdecomp_pseudo_c,
-    encode_gdecomp_dump, equivalence_multipass_vs_classic_code, gpu_decompile_code_to_file,
-    gpu_decompile_to_file, mid_pipeline_host_read_count, multipass_cpu_decompile_from_code,
-    normalize_pseudo, record_mid_pipeline_host_read, region_bytes, structural_ops_match_classic,
-    DecompBenchRow, GpuDecompileReport, GDEC_MAGIC, GDEC_VERSION,
+    DecompBenchRow, GDEC_MAGIC, GDEC_VERSION, GpuDecompileReport, bench_vram_decompile_vs_cpu,
+    classic_mnemonic_to_op, decode_gdecomp_pseudo_c, encode_gdecomp_dump,
+    equivalence_multipass_vs_classic_code, gpu_decompile_code_to_file, gpu_decompile_to_file,
+    mid_pipeline_host_read_count, multipass_cpu_decompile_from_code, normalize_pseudo,
+    record_mid_pipeline_host_read, region_bytes, structural_ops_match_classic,
 };
 
 /// One basic block: closed instruction sequence with a single entry.

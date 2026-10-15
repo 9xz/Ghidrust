@@ -264,6 +264,11 @@ ghidrust decompile /path/to/GameAssembly.dll --addr 0x180012345 --follow-stub
 | **gpu-decompile** | `ghidrust gpu-decompile <path> [--addr HEX] [--out FILE] [--metrics FILE]` | Full **GPU-resident** VRAM multipass decompile at containing-fn resolve (mid-body `addr` ok): decode → leaders → blocks → emit kernels; single final download; asserts `mid_pipeline_host_reads == 0` and multipass-CPU equivalence. Metrics JSON is primary; `.gdecomp` is opaque. | `.gdecomp` binary dump at `--out`. stdout: pseudo-C. `--json` / `--metrics FILE` produces `{resolve, resolved_entry, gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit if equivalence fails or a mid-pipeline host read is observed. |
 | **re-bench** | `ghidrust re-bench <path> [--out FILE]` | CPU decompile of the entry + bulk RE on a padded haystack, once on CPU (parallel) and once on GPU / fallback; asserts equal bulk hit counts. | Text report to stdout (or JSON with `--json` / `--out`). Fields: `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `mode, backend, ms, hits, haystack_bytes`), plus `note` explaining that decompile stays on CPU. |
 
+The Rust API's `Stage1Result::source_map` associates emitted pseudo-C byte ranges
+with original SSA basic-block address ranges. Consumers can synchronize graph,
+assembly, and pseudo-C views at block granularity; this is not an exact
+instruction-to-source map, and generated scaffolding can remain unmapped.
+
 Two more benches are shipped and callable from the CLI even though they are not part of the analyzer/decompile eval sweep — they measure how the analyzer and RTTI GPU strategies compare against their CPU oracles:
 
 | Method | CLI | Purpose |

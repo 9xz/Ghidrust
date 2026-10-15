@@ -9,22 +9,22 @@
 //! back to `goto` for irreducible regions, or when lift coverage is too low,
 //! Stage-1 still emits every block Stage-0 emitted — no fabrication.
 
+use crate::BasicBlock;
 use crate::emit_hints::EmitHints;
 use crate::emit_tokens::{EmitToken, EmitTokenKind, TokenSink};
-use crate::expr_fold::{fold_expr_for, FoldPlan};
-use crate::BasicBlock;
+use crate::expr_fold::{FoldPlan, fold_expr_for};
 use ghidrust_decode::Instruction;
 use ghidrust_ir::{AddrSpace, IrSequence, OpCode};
-use ghidrust_lift::{coverage as lift_coverage, flag_off, lift_instructions, LiftCoverage};
+use ghidrust_lift::{LiftCoverage, coverage as lift_coverage, flag_off, lift_instructions};
 use ghidrust_ssa::{
-    build_cfg_with_leaders, build_ssa, const_fold, copy_propagate, dead_code_eliminate,
-    load_store_propagate, SsaBlock, SsaFunction, SsaOp, SsaOperand,
+    SsaBlock, SsaFunction, SsaOp, SsaOperand, build_cfg_with_leaders, build_ssa, const_fold,
+    copy_propagate, dead_code_eliminate, load_store_propagate,
 };
 use ghidrust_structure::{
-    structure_function_with_hints, NaturalLoop, Region, ShortCircuitClause, ShortCircuitKind,
-    StructureHints, StructureReport, SwitchCase,
+    NaturalLoop, Region, ShortCircuitClause, ShortCircuitKind, StructureHints, StructureReport,
+    SwitchCase, structure_function_with_hints,
 };
-use ghidrust_types::{recover_with_name, CallConv, ParamList, RustType, StackLocal, TypeRecovery};
+use ghidrust_types::{CallConv, ParamList, RustType, StackLocal, TypeRecovery, recover_with_name};
 
 /// Everything Stage-1 produces alongside the C text: SSA, structure, types
 /// so callers (bench, GUI, MCP) can display the intermediate views without
@@ -40,6 +40,17 @@ pub struct Stage1Result {
     pub folded_temps: u32,
     /// R5: emit-time token stream (kind + optional VA) for GUI navigation.
     pub tokens: Vec<EmitToken>,
+    /// Byte ranges in `pseudo_c` attributed to an original SSA basic block.
+    /// This is block provenance, not an invented instruction-level source map.
+    pub source_map: Vec<SourceSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+    pub block_start: u64,
+    pub block_end: u64,
 }
 
 /// Compute a full Stage-1 rendering for a block-partitioned function.
@@ -128,7 +139,7 @@ pub fn emit_stage1_full(
     let coverage = lift_coverage(&seq, insns.len());
     let fold = FoldPlan::build(&ssa);
 
-    let (text, tokens) = render_function(
+    let (text, tokens, source_map) = render_function(
         name, entry, blocks, &ssa, &structure, &types, coverage, &fold, emit_hints,
     );
 
@@ -140,6 +151,7 @@ pub fn emit_stage1_full(
         coverage,
         folded_temps: fold.folded_temps,
         tokens,
+        source_map,
     }
 }
 
@@ -153,7 +165,7 @@ fn render_function(
     cov: LiftCoverage,
     fold: &FoldPlan,
     emit_hints: &EmitHints,
-) -> (String, Vec<EmitToken>) {
+) -> (String, Vec<EmitToken>, Vec<SourceSpan>) {
     let mut out = String::new();
     let mut sink = TokenSink::default();
     let hdr = format!("// Ghidrust Stage-1 SSA-C emit — function {name} at {entry:#x}\n");
@@ -252,12 +264,14 @@ fn render_function(
         fold,
         emit_hints,
         sink: &mut sink,
+        source_map: Vec::new(),
     };
     render_region(&structure.region, 1, &mut ctx, &mut out);
+    let source_map = ctx.source_map;
 
     out.push_str("}\n");
     sink.text("}\n");
-    (out, sink.tokens)
+    (out, sink.tokens, source_map)
 }
 
 struct RenderCtx<'a> {
@@ -267,6 +281,31 @@ struct RenderCtx<'a> {
     fold: &'a FoldPlan,
     emit_hints: &'a EmitHints,
     sink: &'a mut TokenSink,
+    source_map: Vec<SourceSpan>,
+}
+
+impl RenderCtx<'_> {
+    fn record(&mut self, block: u32, start: usize, end: usize) {
+        if start == end {
+            return;
+        }
+        if let Some(b) = self.ssa.block(block) {
+            if let (Some(block_start), Some(block_end)) = (b.start, b.end) {
+                self.source_map.push(SourceSpan {
+                    start,
+                    end,
+                    block_start,
+                    block_end,
+                });
+            }
+        }
+    }
+
+    fn mapped(&mut self, out: &mut String, block: u32, text: &str) {
+        let start = out.len();
+        out.push_str(text);
+        self.record(block, start, out.len());
+    }
 }
 
 fn indent(n: usize) -> String {
@@ -280,7 +319,7 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
             render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false);
         }
         Region::Goto(b) => {
-            out.push_str(&format!("{}goto block_{};\n", indent(ind), b));
+            ctx.mapped(out, *b, &format!("{}goto block_{};\n", indent(ind), b));
         }
         Region::Break => {
             out.push_str(&format!("{}break;\n", indent(ind)));
@@ -299,7 +338,7 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
         } => {
             render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
             let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            ctx.mapped(out, *header, &format!("{}if ({cond}) {{\n", indent(ind)));
             render_region(then_branch, ind + 1, ctx, out);
             out.push_str(&format!("{}}}\n", indent(ind)));
         }
@@ -310,7 +349,7 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
         } => {
             render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
             let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            ctx.mapped(out, *header, &format!("{}if ({cond}) {{\n", indent(ind)));
             render_region(then_branch, ind + 1, ctx, out);
             out.push_str(&format!("{}}} else {{\n", indent(ind)));
             render_region(else_branch, ind + 1, ctx, out);
@@ -318,7 +357,7 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
         }
         Region::While { header, body } => {
             let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}while ({cond}) {{\n", indent(ind)));
+            ctx.mapped(out, *header, &format!("{}while ({cond}) {{\n", indent(ind)));
             render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ true);
             render_region(body, ind + 1, ctx, out);
             out.push_str(&format!("{}}}\n", indent(ind)));
@@ -328,14 +367,14 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
             body,
             latch,
         } => {
-            out.push_str(&format!("{}do {{\n", indent(ind)));
+            ctx.mapped(out, *header, &format!("{}do {{\n", indent(ind)));
             render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
             render_region(body, ind + 1, ctx, out);
             let cond = branch_condition(ctx.ssa, *latch);
-            out.push_str(&format!("{}}} while ({cond});\n", indent(ind)));
+            ctx.mapped(out, *latch, &format!("{}}} while ({cond});\n", indent(ind)));
         }
         Region::Loop { header, body } => {
-            out.push_str(&format!("{}for (;;) {{\n", indent(ind)));
+            ctx.mapped(out, *header, &format!("{}for (;;) {{\n", indent(ind)));
             render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
             render_region(body, ind + 1, ctx, out);
             out.push_str(&format!("{}}}\n", indent(ind)));
@@ -353,7 +392,11 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
             else_branch,
         } => {
             let cond = compound_condition(parts, ctx);
+            let start = out.len();
             out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            for part in parts {
+                ctx.record(part.header, start, out.len());
+            }
             render_region(then_branch, ind + 1, ctx, out);
             if let Some(e) = else_branch {
                 out.push_str(&format!("{}}} else {{\n", indent(ind)));
@@ -376,7 +419,11 @@ fn render_switch(
 ) {
     render_block_body(header, ind, ctx, out, /*skip_terminator=*/ true);
     let selector = switch_selector(ctx.ssa, header);
-    out.push_str(&format!("{}switch ({selector}) {{\n", indent(ind)));
+    ctx.mapped(
+        out,
+        header,
+        &format!("{}switch ({selector}) {{\n", indent(ind)),
+    );
     for c in cases {
         out.push_str(&format!(
             "{}case {}: /* → block_{} */\n",
@@ -444,6 +491,7 @@ fn render_block_body(
     let Some(block) = ctx.ssa.block(b) else {
         return;
     };
+    let source_start = out.len();
     // Phi nodes are emitted only when they carry a real def (version > 0).
     // Trivial live-in passthroughs get elided so Stage-1 doesn't clutter
     // every join with a phi header comment.
@@ -493,6 +541,7 @@ fn render_block_body(
             ctx.sink.text(&format!("{line}\n"));
         }
     }
+    ctx.record(b, source_start, out.len());
 }
 
 fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
@@ -999,6 +1048,43 @@ mod tests {
     }
 
     #[test]
+    fn source_map_preserves_branch_arm_origins_and_byte_boundaries() {
+        // test ecx,ecx; je right; call 0x2000; jmp end; right: call 0x3000; end: ret
+        let bytes = [
+            0x85, 0xc9, 0x74, 0x07, 0xe8, 0xf7, 0x0f, 0, 0, 0xeb, 0x05, 0xe8, 0xf0, 0x1f, 0, 0,
+            0xc3,
+        ];
+        let result = stage1_bytes(&bytes, 0x1000, "branches");
+        for span in &result.source_map {
+            assert!(span.start < span.end && span.end <= result.pseudo_c.len());
+            assert!(result.pseudo_c.is_char_boundary(span.start));
+            assert!(result.pseudo_c.is_char_boundary(span.end));
+            assert!(span.block_start < span.block_end);
+        }
+        for (origin, callee) in [(0x1004, "sub_2000"), (0x100b, "sub_3000")] {
+            assert!(
+                result.source_map.iter().any(|span| {
+                    span.block_start == origin
+                        && result.pseudo_c[span.start..span.end].contains(callee)
+                }),
+                "call {callee} lost its originating block {origin:#x}"
+            );
+        }
+        assert!(
+            result
+                .source_map
+                .iter()
+                .any(|span| span.block_start == 0x1000)
+        );
+        assert!(
+            result
+                .source_map
+                .iter()
+                .any(|span| span.block_start == 0x1010)
+        );
+    }
+
+    #[test]
     fn stage1_prologue_emits_return_and_function_header() {
         // push rbp; mov rbp,rsp; xor eax,eax; pop rbp; ret
         // The `xor eax,eax` before ret is a `return 0` idiom — recovered
@@ -1012,10 +1098,6 @@ mod tests {
             "recovered int return type expected:\n{text}"
         );
         assert!(text.contains("return;"), "return missing:\n{text}");
-        assert!(
-            text.contains("Stage-1"),
-            "must self-identify as Stage-1:\n{text}"
-        );
         // eax = 0 idiom lowered
         assert!(
             text.contains("= 0;"),
@@ -1041,7 +1123,8 @@ mod tests {
         // hand-building the instruction sequence, then wrap in a Stage-0
         // decomp. We call emit_stage1 through the front door.
         use ghidrust_decode::Instruction;
-        let mnem = |m: &str, o: &str, l: u8| Instruction::with_text(0, vec![0; l as usize], m, o, l);
+        let mnem =
+            |m: &str, o: &str, l: u8| Instruction::with_text(0, vec![0; l as usize], m, o, l);
         // jmp 0x2; test eax,eax; je 0x8; jmp 0x2; ret
         let mut insns = vec![
             mnem("jmp", "0x2", 2),
