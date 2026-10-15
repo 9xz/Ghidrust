@@ -62,6 +62,9 @@ Binaries:
 | Ghidnet capture helper | `target/release/ghidrust-netcap` |
 
 ```bash
+# CPU-only decompiler library (no Vulkan/wgpu dependency)
+cargo check -p ghidrust-decomp --no-default-features
+
 # CLI only
 cargo build -p ghidrust-cli --release
 

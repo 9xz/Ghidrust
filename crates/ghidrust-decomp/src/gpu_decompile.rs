@@ -38,7 +38,8 @@ const MAX_CODE: usize = 4096;
 
 /// Fixed IR slot (matches WGSL / multipass CPU reference).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "gpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct GpuIrSlot {
     pub valid: u32,
     pub off: u32,
