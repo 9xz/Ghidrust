@@ -1,12 +1,14 @@
 //! Map each Auto Analysis name to a GPU kernel strategy + host seed merge.
 
-use super::engine::{cpu_emulate_kernel, run_kernel, GpuPhaseTiming, KernelKind, MAX_HITS};
+use super::engine::{GpuPhaseTiming, KernelKind, MAX_HITS, cpu_emulate_kernel, run_kernel};
 use super::{flatten_exec, flatten_image, pad_large};
+use crate::pe_functions::KnownFunctionSpans;
 use crate::program::{
     CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo, MediaHit, Program, ResourceInfo,
     SymbolInfo,
 };
 use crate::rtti::RttiClass;
+use std::collections::HashSet;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,17 +235,25 @@ pub fn merge_seeds_into_program(
             prog.analysis.resources.len()
         }
         GpuStrategyClass::PrologueSeed | GpuStrategyClass::PrologueAbi => {
+            // Byte-pattern seeds are heuristic: one strictly inside a `.pdata` body or an
+            // analyzed function would split it, so only candidates outside every known
+            // body (and not already an entry) become functions.
+            let known = KnownFunctionSpans::from_program(prog);
+            let mut entries: HashSet<u64> =
+                prog.analysis.functions.iter().map(|f| f.entry).collect();
             for &off in hits {
-                if let Some(va) = flat_to_va(map, off) {
-                    if !prog.analysis.functions.iter().any(|f| f.entry == va) {
-                        let mut fi = FunctionInfo::new(va, va, format!("FUN_{va:016x}"))
-                            .with_seed_kind(crate::program::FunctionSeedKind::Prologue);
-                        if strategy == GpuStrategyClass::PrologueAbi {
-                            fi.calling_convention = Some("unknown".into());
-                        }
-                        prog.analysis.functions.push(fi);
-                    }
+                let Some(va) = flat_to_va(map, off) else {
+                    continue;
+                };
+                if known.contains_interior(va) || !entries.insert(va) {
+                    continue;
                 }
+                let mut fi = FunctionInfo::new(va, va, format!("FUN_{va:016x}"))
+                    .with_seed_kind(crate::program::FunctionSeedKind::Prologue);
+                if strategy == GpuStrategyClass::PrologueAbi {
+                    fi.calling_convention = Some("unknown".into());
+                }
+                prog.analysis.functions.push(fi);
             }
             prog.analysis.functions.len()
         }
@@ -301,6 +311,7 @@ pub fn merge_seeds_into_program(
         }
         GpuStrategyClass::SpillScan | GpuStrategyClass::StackFrame | GpuStrategyClass::SubRsp => {
             // Annotate existing or seed functions with stack/param markers
+            let known = KnownFunctionSpans::from_program(prog);
             let mut n = 0usize;
             for &off in hits {
                 if let Some(va) = flat_to_va(map, off) {
@@ -312,7 +323,7 @@ pub fn merge_seeds_into_program(
                     {
                         f.stack_locals.push(format!("spill_{va:x}"));
                         n += 1;
-                    } else {
+                    } else if !known.contains_interior(va) {
                         let mut fi = FunctionInfo::new(va, va, format!("FUN_{va:016x}"));
                         fi.stack_locals = vec![format!("frame_{va:x}")];
                         prog.analysis.functions.push(fi);
@@ -602,5 +613,157 @@ pub fn bench_decompile(prog: &Program) -> super::AnalyzerBenchRow {
             .into(),
         analyzer_oracle: 0,
         merged_primary: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Host-merge regressions: seeds come from the CPU kernel oracle, so no GPU
+    //! adapter is needed and results are deterministic.
+    use super::*;
+    use crate::analyzers::run_analyzers;
+    use crate::pe_functions::split_bait as bait;
+
+    const FSS: &str = "Function Start Search";
+
+    type FlatMap = Vec<(u64, usize, usize)>;
+
+    /// CPU-oracle prologue hits plus the exec haystack/map the merge consumes.
+    fn oracle(prog: &Program) -> (Vec<u32>, FlatMap, Vec<u8>) {
+        let (_, hits, _) = cpu_seed_count(prog, FSS, GpuStrategyClass::PrologueSeed, None);
+        let (hay, map) = flatten_exec(prog);
+        (hits, map, hay)
+    }
+
+    fn flat_off(map: &[(u64, usize, usize)], va: u64) -> u32 {
+        map.iter()
+            .find(|&&(base, _, len)| va >= base && va - base < len as u64)
+            .map(|&(base, start, _)| (start as u64 + (va - base)) as u32)
+            .expect("va is mapped")
+    }
+
+    fn entries(prog: &Program) -> Vec<u64> {
+        prog.analysis.functions.iter().map(|f| f.entry).collect()
+    }
+
+    #[test]
+    fn prologue_oracle_proposes_interior_patterns_as_candidates() {
+        // Premise of the regressions below: the heuristic really does hit inside BAIT.
+        let prog = bait::program();
+        let (hits, map, _) = oracle(&prog);
+        let mut vas: Vec<u64> = hits.iter().filter_map(|&h| flat_to_va(&map, h)).collect();
+        vas.sort_unstable();
+        assert_eq!(
+            vas,
+            [bait::INTERIOR_SUB_RSP, bait::INTERIOR_PUSH_RBP, bait::NEXT]
+        );
+    }
+
+    #[test]
+    fn prologue_merge_leaves_analyzed_boundaries_and_calls_intact() {
+        let mut prog = bait::program();
+        run_analyzers(&mut prog, &[FSS]).unwrap();
+        let before = prog.analysis.functions.clone();
+        assert_eq!(entries(&prog), [bait::BAIT, bait::NEXT]);
+
+        let (hits, map, hay) = oracle(&prog);
+        let n = merge_seeds_into_program(
+            &mut prog,
+            FSS,
+            GpuStrategyClass::PrologueSeed,
+            &hits,
+            &[],
+            &map,
+            &hay,
+        );
+        assert_eq!(n, 2, "interior candidates must not add functions");
+        assert_eq!(
+            prog.analysis.functions, before,
+            "GPU seeds must not split or shrink analyzed functions"
+        );
+        let edges = crate::xrefs::calls_callees(&prog, bait::BAIT);
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.kind == "call" && e.to == bait::NEXT && e.to_entry == Some(bait::NEXT)),
+            "BAIT lost its call to NEXT: {edges:?}"
+        );
+    }
+
+    #[test]
+    fn prologue_merge_uses_pdata_without_prior_analysis() {
+        for strategy in [
+            GpuStrategyClass::PrologueSeed,
+            GpuStrategyClass::PrologueAbi,
+        ] {
+            let mut prog = bait::program();
+            assert!(prog.analysis.functions.is_empty());
+            let (hits, map, hay) = oracle(&prog);
+            let n = merge_seeds_into_program(&mut prog, FSS, strategy, &hits, &[], &map, &hay);
+            // Interior hits dropped; the candidate outside every known body stays eligible.
+            assert_eq!(n, 1);
+            assert_eq!(entries(&prog), [bait::NEXT]);
+            let f = &prog.analysis.functions[0];
+            assert_eq!(
+                f.seed_kind,
+                Some(crate::program::FunctionSeedKind::Prologue)
+            );
+            assert_eq!(
+                f.calling_convention.is_some(),
+                strategy == GpuStrategyClass::PrologueAbi
+            );
+        }
+    }
+
+    #[test]
+    fn prologue_merge_respects_entry_interior_end_of_known_bodies() {
+        let mut prog = bait::program();
+        let next = FunctionInfo::new(bait::NEXT, bait::NEXT_END, "next");
+        prog.analysis.functions.push(next.clone());
+        let (_, map, hay) = oracle(&prog);
+        let hits: Vec<u32> = [
+            bait::NEXT,              // already an entry
+            bait::NEXT + 1,          // interior (analyzed function)
+            bait::NEXT_END - 1,      // last byte of the body
+            bait::INTERIOR_SUB_RSP,  // interior (.pdata only, no function record)
+            bait::INTERIOR_PUSH_RBP, // interior (.pdata only)
+            bait::NEXT_END,          // first byte after the body: eligible
+        ]
+        .map(|va| flat_off(&map, va))
+        .to_vec();
+        merge_seeds_into_program(
+            &mut prog,
+            FSS,
+            GpuStrategyClass::PrologueSeed,
+            &hits,
+            &[],
+            &map,
+            &hay,
+        );
+        assert_eq!(entries(&prog), [bait::NEXT, bait::NEXT_END]);
+        assert_eq!(prog.analysis.functions[0], next, "existing body unchanged");
+    }
+
+    #[test]
+    fn stack_marker_merge_does_not_create_interior_function() {
+        let mut prog = bait::program();
+        let (_, map, hay) = oracle(&prog);
+        let hits = [bait::INTERIOR_SUB_RSP, bait::INTERIOR_PUSH_RBP, bait::NEXT]
+            .map(|va| flat_off(&map, va));
+        let n = merge_seeds_into_program(
+            &mut prog,
+            "Stack",
+            GpuStrategyClass::StackFrame,
+            &hits,
+            &[],
+            &map,
+            &hay,
+        );
+        assert_eq!(n, 1);
+        assert_eq!(entries(&prog), [bait::NEXT]);
+        assert_eq!(
+            prog.analysis.functions[0].stack_locals,
+            vec![format!("frame_{:x}", bait::NEXT)]
+        );
     }
 }

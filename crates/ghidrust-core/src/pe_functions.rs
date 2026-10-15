@@ -213,6 +213,57 @@ pub fn runtime_function_containing(prog: &Program, va: u64) -> Option<RuntimeFun
         .find(|rf| va >= rf.begin_va && va < rf.end_va)
 }
 
+/// Sorted, disjoint `[start, end)` spans of function bodies already known to be real.
+///
+/// Built once and queried by binary search so heuristic seed filters stay
+/// `O((n + q) log n)` instead of rescanning every function per candidate.
+/// Overlapping inputs are merged; touching spans (`end == next.start`) stay
+/// separate so a function entry is never "interior" to its predecessor.
+#[derive(Debug, Clone, Default)]
+pub struct KnownFunctionSpans {
+    spans: Vec<(u64, u64)>,
+}
+
+impl KnownFunctionSpans {
+    /// Build from arbitrary `(start, end)` pairs; empty/inverted pairs are ignored.
+    pub fn new(ranges: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        let mut sorted: Vec<(u64, u64)> = ranges.into_iter().filter(|&(s, e)| e > s).collect();
+        sorted.sort_unstable();
+        let mut spans: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+        for (start, end) in sorted {
+            match spans.last_mut() {
+                Some(last) if start < last.1 => last.1 = last.1.max(end),
+                _ => spans.push((start, end)),
+            }
+        }
+        Self { spans }
+    }
+
+    /// PE Exception Directory bodies only (authoritative begin/end).
+    pub fn from_runtime(rts: &[RuntimeFunction]) -> Self {
+        Self::new(rts.iter().map(|rf| (rf.begin_va, rf.end_va)))
+    }
+
+    /// PE Exception Directory bodies plus every analyzed function with a real extent.
+    /// Zero-length seed stubs (`end <= entry`) do not claim any bytes.
+    pub fn from_program(prog: &Program) -> Self {
+        Self::new(
+            parse_runtime_functions(prog)
+                .into_iter()
+                .map(|rf| (rf.begin_va, rf.end_va))
+                .chain(prog.analysis.functions.iter().map(|f| (f.entry, f.end))),
+        )
+    }
+
+    /// True when `va` falls strictly after the first byte of a known body and before
+    /// its end — i.e. a heuristic function start there would split that body.
+    /// A body's own entry address is not interior.
+    pub fn contains_interior(&self, va: u64) -> bool {
+        let after = self.spans.partition_point(|&(start, _)| start < va);
+        after > 0 && va < self.spans[after - 1].1
+    }
+}
+
 /// Grow a function body from `entry` until a stop condition.
 ///
 /// Stop at the earliest of: `hard_end`, first `ret`, int3 run ≥ 2, decode bail.
@@ -400,6 +451,111 @@ fn rdu32(data: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
 }
 
+/// Deterministic in-memory PE64 shared by the function-bound regression tests
+/// (CPU Function Start Search and GPU host merge). Never touches an external file.
+#[cfg(test)]
+pub(crate) mod split_bait {
+    use crate::program::Program;
+
+    pub const BAIT: u64 = 0x1_4000_1000;
+    pub const BAIT_END: u64 = 0x1_4000_1025;
+    /// `48 83 ec 20` after `push rsi; push rdi; push rbx` — interior prologue pattern.
+    pub const INTERIOR_SUB_RSP: u64 = BAIT + 0x03;
+    /// `55 48 89 e5` after an early `ret` — interior prologue pattern.
+    pub const INTERIOR_PUSH_RBP: u64 = BAIT + 0x13;
+    /// Real function with no `.pdata`; only its own `sub rsp, imm8` seeds it.
+    pub const NEXT: u64 = 0x1_4000_1030;
+    pub const NEXT_END: u64 = 0x1_4000_103B;
+
+    /// `.pdata`-bounded body: three pushes, `sub rsp`, early `ret`, a second
+    /// prologue-looking sequence, a `call NEXT`, then the real epilogue.
+    const BAIT_CODE: [u8; 0x25] = [
+        0x56, 0x57, 0x53, // 00 push rsi; push rdi; push rbx
+        0x48, 0x83, 0xEC, 0x20, // 03 sub rsp, 0x20
+        0x85, 0xC9, // 07 test ecx, ecx
+        0x75, 0x08, // 09 jne 0x13
+        0x48, 0x83, 0xC4, 0x20, // 0b add rsp, 0x20
+        0x5B, 0x5F, 0x5E, // 0f pop rbx; pop rdi; pop rsi
+        0xC3, // 12 ret (early return)
+        0x55, 0x48, 0x89, 0xE5, // 13 push rbp; mov rbp, rsp
+        0xE8, 0x14, 0x00, 0x00, 0x00, // 17 call 0x1030
+        0x5D, // 1c pop rbp
+        0x48, 0x83, 0xC4, 0x20, // 1d add rsp, 0x20
+        0x5B, 0x5F, 0x5E, // 21 pop rbx; pop rdi; pop rsi
+        0xC3, // 24 ret
+    ];
+
+    const NEXT_CODE: [u8; 0x0B] = [
+        0x48, 0x83, 0xEC, 0x28, // sub rsp, 0x28
+        0x31, 0xC0, // xor eax, eax
+        0x48, 0x83, 0xC4, 0x28, // add rsp, 0x28
+        0xC3, // ret
+    ];
+
+    fn write_sec(data: &mut [u8], off: usize, name: &[u8; 8], va: u32, chars: u32, file_off: u32) {
+        data[off..off + 8].copy_from_slice(name);
+        data[off + 8..off + 12].copy_from_slice(&0x1000u32.to_le_bytes()); // virtual size
+        data[off + 12..off + 16].copy_from_slice(&va.to_le_bytes());
+        data[off + 16..off + 20].copy_from_slice(&0x200u32.to_le_bytes()); // raw size
+        data[off + 20..off + 24].copy_from_slice(&file_off.to_le_bytes());
+        data[off + 36..off + 40].copy_from_slice(&chars.to_le_bytes());
+    }
+
+    /// PE32+ with `.text` at RVA 0x1000 (0xCC-filled past `text`) and a `.pdata`
+    /// Exception Directory listing `pdata` `(begin_rva, end_rva)` ranges.
+    /// `AddressOfEntryPoint` is 0 (/NOENTRY DLL shape), so no entry seed exists.
+    pub fn pe_bytes(text: &[u8], pdata: &[(u32, u32)]) -> Vec<u8> {
+        assert!(text.len() <= 0x200 && pdata.len() * 12 <= 0x100);
+        let mut data = vec![0u8; 0x800];
+        data[0..2].copy_from_slice(b"MZ");
+        data[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        data[0x80..0x84].copy_from_slice(b"PE\0\0");
+        let coff = 0x84;
+        data[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes());
+        data[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes());
+        data[coff + 16..coff + 18].copy_from_slice(&0xF0u16.to_le_bytes());
+        let opt = coff + 20;
+        data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        data[opt + 24..opt + 32].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+        data[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+        let exc = opt + 112 + 3 * 8;
+        data[exc..exc + 4].copy_from_slice(&0x2000u32.to_le_bytes());
+        data[exc + 4..exc + 8].copy_from_slice(&((pdata.len() * 12) as u32).to_le_bytes());
+
+        let sec = opt + 0xF0;
+        write_sec(&mut data, sec, b".text\0\0\0", 0x1000, 0x6000_0020, 0x400);
+        write_sec(
+            &mut data,
+            sec + 40,
+            b".pdata\0\0",
+            0x2000,
+            0x4000_0040,
+            0x600,
+        );
+
+        data[0x400..0x600].fill(0xCC);
+        data[0x400..0x400 + text.len()].copy_from_slice(text);
+        for (i, &(begin, end)) in pdata.iter().enumerate() {
+            let o = 0x600 + i * 12;
+            data[o..o + 4].copy_from_slice(&begin.to_le_bytes());
+            data[o + 4..o + 8].copy_from_slice(&end.to_le_bytes());
+            data[o + 8..o + 12].copy_from_slice(&0x2100u32.to_le_bytes());
+        }
+        // UNWIND_INFO at RVA 0x2100 (file 0x700): version 1, no flags/prolog/codes.
+        data[0x700] = 0x01;
+        data
+    }
+
+    /// `BAIT` (pdata-bounded) followed by `NEXT` (no metadata), `.text` otherwise 0xCC.
+    pub fn program() -> Program {
+        let mut text = [0xCCu8; 0x40];
+        text[..BAIT_CODE.len()].copy_from_slice(&BAIT_CODE);
+        text[0x30..0x30 + NEXT_CODE.len()].copy_from_slice(&NEXT_CODE);
+        let bytes = pe_bytes(&text, &[(0x1000, 0x1025)]);
+        crate::pe::load_pe(&bytes, "split_bait").expect("load split_bait PE")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,7 +582,7 @@ mod tests {
         data[coff + 16..coff + 18].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size
         let opt = coff + 20; // 0x98
         data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
-                                                                     // AddressOfEntryPoint RVA
+        // AddressOfEntryPoint RVA
         data[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
         // ImageBase
         data[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
@@ -439,7 +595,7 @@ mod tests {
         data[exc + 4..exc + 8].copy_from_slice(&12u32.to_le_bytes());
 
         let sec = opt + 0xF0; // section table
-                              // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
+        // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
         write_sec(
             &mut data,
             sec,
@@ -520,7 +676,7 @@ mod tests {
         // flags: version=1 (low 3) + CHAININFO (bit of flags << 3) → 0x01 | (0x4 << 3) = 0x21
         bytes[0x60C] = 0x21;
         bytes[0x60E] = 0x00; // no codes
-                             // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
+        // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
         bytes[0x610..0x614].copy_from_slice(&0u32.to_le_bytes());
         bytes[0x614..0x618].copy_from_slice(&0x1008u32.to_le_bytes());
         bytes[0x618..0x61C].copy_from_slice(&0x200Cu32.to_le_bytes());
@@ -597,5 +753,57 @@ mod tests {
             f.end
         );
         assert_eq!(prog.function_at(0x1000).unwrap().end, f.end);
+    }
+
+    #[test]
+    fn known_spans_interior_excludes_entry_and_end() {
+        let spans = KnownFunctionSpans::new([(0x1000, 0x1020), (0x1020, 0x1030), (0x2000, 0x2000)]);
+        assert!(!spans.contains_interior(0xFFF));
+        assert!(!spans.contains_interior(0x1000), "entry is not interior");
+        assert!(spans.contains_interior(0x1001));
+        assert!(spans.contains_interior(0x101F));
+        assert!(
+            !spans.contains_interior(0x1020),
+            "touching successor's entry is not interior"
+        );
+        assert!(spans.contains_interior(0x1021));
+        assert!(!spans.contains_interior(0x1030), "end is exclusive");
+        assert!(
+            !spans.contains_interior(0x2000),
+            "empty span claims no bytes"
+        );
+    }
+
+    #[test]
+    fn known_spans_merge_overlaps_regardless_of_input_order() {
+        let spans = KnownFunctionSpans::new([(0x1100, 0x1200), (0x1000, 0x1150), (0x3000, 0x3010)]);
+        assert!(spans.contains_interior(0x1100), "nested begin is interior");
+        assert!(spans.contains_interior(0x11FF));
+        assert!(!spans.contains_interior(0x1200));
+        assert!(spans.contains_interior(0x3001));
+        assert!(!spans.contains_interior(0x2FFF));
+    }
+
+    #[test]
+    fn known_spans_from_program_ignore_zero_length_stubs() {
+        let mut prog = split_bait::program();
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(0x1_4000_2000, 0x1_4000_2000, "stub"));
+        prog.analysis.functions.push(FunctionInfo::new(
+            split_bait::NEXT,
+            split_bait::NEXT_END,
+            "next",
+        ));
+        let spans = KnownFunctionSpans::from_program(&prog);
+        assert!(
+            spans.contains_interior(split_bait::INTERIOR_SUB_RSP),
+            "pdata"
+        );
+        assert!(spans.contains_interior(split_bait::NEXT + 1), "analyzed fn");
+        assert!(
+            !spans.contains_interior(0x1_4000_2001),
+            "stub claims nothing"
+        );
     }
 }

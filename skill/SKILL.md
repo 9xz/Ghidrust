@@ -841,7 +841,7 @@ Output column names the field on `AnalyzerOutput` you get in `--json`
 | 9 | `Embedded Media` | PNG / JPG / GIF / WAV / … magic scan. | `media: [{kind, va}]` | `found N media signature(s)` |
 | 9b | `Find Crypt` | Cryptographic constant tables (S-box, TEA delta, hash K, stream sigma, …). | `crypt_constants: [{va, algorithm, constant, size}]` | `found N cryptographic constant hit(s)` |
 | 10 | `Function ID` | Prologue-window hash → shipped `fid_*` catalog match. | `fid_matches: [{entry, matched_name}]` | `matched N FID signature(s)` |
-| 11 | `Function Start Search` | Entry + symbols + exact `55 48 89 e5` + orphan `sub rsp, imm8`; grows to `ret`/`int3`; drops mid-body seeds. | `functions: [{entry, end, name}]` | `identified N function start(s)` |
+| 11 | `Function Start Search` | `.pdata` + exports, then entry + symbols + exact `55 48 89 e5` + orphan `sub rsp, imm8`; `.pdata` bodies keep their full unwind span (interior weak/GPU seeds dropped); other bodies grow to `ret`/`int3`; drops mid-body seeds. | `functions: [{entry, end, name}]` | `identified N function start(s)` |
 | 12 | `Non-Returning Functions - Discovered` | `int3`-terminated bodies + known no-return imports. | `noreturn_entries: [va, …]` (+ `functions[*].noreturn`) | `marked N noreturn function(s)` |
 | 12b | `Obfuscated Strings` | Stack / tight / decoded string recovery from executable blocks. | `obfuscated_strings: [{va, value, kind, decoder_va?, call_site?}]` | `recovered N obfuscated string(s)` |
 | 13 | `PDB MSDIA` | MSF7 reader with MSDIA-shaped filtering. | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (msdia→universal)` |

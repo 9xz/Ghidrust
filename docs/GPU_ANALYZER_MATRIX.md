@@ -18,7 +18,7 @@ CPU remains the correctness oracle. Timing always splits **PCIe** (upload+downlo
 | Demangler Microsoft | `cstr_multi` | `.?AV` / `?` mangled prefix multi-needle |
 | Embedded Media | `magic_media` | PNG/JPEG/GIF/RIFF magic parallel match |
 | Function ID | `hash_window` | Fixed-window rolling hash over exec prologues |
-| Function Start Search | `prologue_seed` | `55 48 89 e5` and `48 83 ec` start seeds |
+| Function Start Search | `prologue_seed` | `55 48 89 e5` and `48 83 ec` start seeds; host merge drops hits strictly inside a `.pdata` body or analyzed function |
 | Non-Returning Functions - Discovered | `cstr_multi` | ExitProcess / abort-style API name needles |
 | PDB MSDIA | `cstr_multi` | MSF / PDB signature strings |
 | PDB Universal | `cstr_multi` | Same portable MSF/signature family (distinct needle set id) |
